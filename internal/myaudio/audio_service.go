@@ -38,7 +38,12 @@ type AudioCaptureService struct {
 	malgoContext   *malgo.AllocatedContext
 	audioLevelChan chan AudioLevelData
 	restartChan    chan struct{}
-	bn             *birdnet.BirdNET // BirdNET instance for analysis
+	bn             *birdnet.BirdNET // Default BirdNET instance for analysis
+
+	// Mapping of source IDs to specific BirdNET instances
+	sourceToModelMap map[string]string           // Maps source ID to model ID
+	modelInstances   map[string]*birdnet.BirdNET // Maps model ID to BirdNET instance
+	modelMapMu       sync.RWMutex
 
 	// FFmpeg monitor for RTSP streams
 	ffmpegMonitor *FFmpegMonitor
@@ -62,13 +67,15 @@ func NewAudioCaptureService(settings *conf.Settings) (*AudioCaptureService, erro
 	wg := &sync.WaitGroup{}
 
 	service := &AudioCaptureService{
-		ctx:            ctx,
-		cancel:         cancel,
-		wg:             wg,
-		settings:       settings,
-		audioLevelChan: make(chan AudioLevelData, 10),
-		restartChan:    make(chan struct{}, 10),
-		bufferMonitors: make(map[string]chan struct{}),
+		ctx:              ctx,
+		cancel:           cancel,
+		wg:               wg,
+		settings:         settings,
+		audioLevelChan:   make(chan AudioLevelData, 10),
+		restartChan:      make(chan struct{}, 10),
+		bufferMonitors:   make(map[string]chan struct{}),
+		sourceToModelMap: make(map[string]string),
+		modelInstances:   make(map[string]*birdnet.BirdNET),
 	}
 
 	// Initialize the malgo context
@@ -598,15 +605,50 @@ func (s *AudioCaptureService) ConnectExternalChannels(restartChan chan struct{})
 	}
 }
 
-// SetBirdNET sets the BirdNET instance for analysis
+// SetBirdNET sets the default BirdNET instance for analysis
 func (s *AudioCaptureService) SetBirdNET(bn *birdnet.BirdNET) {
 	s.bn = bn
 }
 
+// AssignModelToSource assigns a specific model ID to a source
+func (s *AudioCaptureService) AssignModelToSource(sourceID, modelID string) {
+	s.modelMapMu.Lock()
+	defer s.modelMapMu.Unlock()
+	s.sourceToModelMap[sourceID] = modelID
+	log.Printf("📊 Assigned model %s to source %s", modelID, sourceID)
+}
+
+// RegisterModelInstance registers a BirdNET instance with a model ID
+func (s *AudioCaptureService) RegisterModelInstance(modelID string, instance *birdnet.BirdNET) {
+	s.modelMapMu.Lock()
+	defer s.modelMapMu.Unlock()
+	s.modelInstances[modelID] = instance
+	log.Printf("📊 Registered model instance with ID %s", modelID)
+}
+
+// GetBirdNETForSource returns the appropriate BirdNET instance for a given source
+func (s *AudioCaptureService) GetBirdNETForSource(sourceID string) *birdnet.BirdNET {
+	s.modelMapMu.RLock()
+	defer s.modelMapMu.RUnlock()
+
+	// Check if this source has a specific model assigned
+	if modelID, ok := s.sourceToModelMap[sourceID]; ok {
+		// Check if we have this model instance registered
+		if instance, ok := s.modelInstances[modelID]; ok {
+			return instance
+		}
+	}
+
+	// Fall back to the default instance
+	return s.bn
+}
+
 // StartBufferMonitor starts a monitor for the specified buffer
 func (s *AudioCaptureService) StartBufferMonitor(sourceID string) {
-	if s.bn == nil {
-		log.Printf("❌ Cannot start buffer monitor for %s: BirdNET instance not set", sourceID)
+	// Get the appropriate BirdNET instance for this source
+	instance := s.GetBirdNETForSource(sourceID)
+	if instance == nil {
+		log.Printf("❌ Cannot start buffer monitor for %s: No BirdNET instance available", sourceID)
 		return
 	}
 
@@ -628,7 +670,7 @@ func (s *AudioCaptureService) StartBufferMonitor(sourceID string) {
 	go func() {
 		defer s.wg.Done()
 		log.Printf("📊 Started analysis buffer monitor for %s", sourceID)
-		AnalysisBufferMonitor(s.wg, s.bn, quitChan, sourceID)
+		AnalysisBufferMonitor(s.wg, instance, quitChan, sourceID)
 	}()
 }
 
@@ -695,4 +737,53 @@ func (s *AudioCaptureService) captureRTSPWithService(url, transport string) {
 
 	// Call the existing CaptureAudioRTSP function with our channels
 	CaptureAudioRTSP(url, transport, s.wg, quitChan, s.restartChan, s.audioLevelChan)
+}
+
+// ConfigureModelForSource creates and configures a BirdNET instance for a source
+func (s *AudioCaptureService) ConfigureModelForSource(sourceID, modelID, modelPath, labelPath string) error {
+	s.modelMapMu.Lock()
+	defer s.modelMapMu.Unlock()
+
+	// Map the source to the model ID
+	s.sourceToModelMap[sourceID] = modelID
+
+	// If the model instance already exists, we can just return
+	if _, exists := s.modelInstances[modelID]; exists {
+		log.Printf("📊 Source %s mapped to existing model instance %s", sourceID, modelID)
+		return nil
+	}
+
+	// Otherwise, create a new instance
+	// Create a copy of settings to avoid modifying the original
+	instanceSettings := *s.settings
+
+	// Override the model and label paths if provided
+	if modelPath != "" {
+		instanceSettings.BirdNET.ModelPath = modelPath
+	}
+	if labelPath != "" {
+		instanceSettings.BirdNET.LabelPath = labelPath
+	}
+
+	// Create the new instance
+	instance, err := birdnet.NewBirdNET(&instanceSettings)
+	if err != nil {
+		return fmt.Errorf("failed to create BirdNET instance for model %s: %w", modelID, err)
+	}
+
+	// Initialize species list for this instance
+	if err := birdnet.BuildRangeFilter(instance); err != nil {
+		// Clean up the instance if species list initialization fails
+		instance.Delete()
+		return fmt.Errorf("failed to initialize species list for model %s: %w", modelID, err)
+	}
+
+	// Register the instance
+	birdnet.RegisterInstance(modelID, instance)
+
+	// Store the instance locally
+	s.modelInstances[modelID] = instance
+	log.Printf("📊 Created new BirdNET instance %s for source %s", modelID, sourceID)
+
+	return nil
 }

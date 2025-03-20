@@ -279,6 +279,17 @@ func AnalysisBufferMonitor(wg *sync.WaitGroup, bn *birdnet.BirdNET, quitChan cha
 	// preRecordingTime is the time to subtract from the current time to get the start time of the detection
 	const preRecordingTime = -5000 * time.Millisecond
 
+	// Identify which BirdNET instance we're using
+	instanceID := "unknown"
+	for _, id := range birdnet.ListInstances() {
+		if bn == birdnet.GetInstance(id) {
+			instanceID = id
+			break
+		}
+	}
+
+	log.Printf("📊 Analysis buffer monitor for %s using BirdNET instance: %s", source, instanceID)
+
 	wg.Add(1)
 	defer func() {
 		wg.Done()

@@ -23,8 +23,7 @@ type DetectionsMap map[string][]datastore.Results
 // Predict performs inference on a given sample using the TensorFlow Lite interpreter.
 // It processes the sample to predict species and their confidence levels.
 func (bn *BirdNET) Predict(sample [][]float32) ([]datastore.Results, error) {
-	// implement locking to prevent concurrent access to the interpreter, not
-	// necessarily best way to manage multiple audio sources but works for now
+	// Implement locking to prevent concurrent access to the interpreter
 	bn.mu.Lock()
 	defer bn.mu.Unlock()
 

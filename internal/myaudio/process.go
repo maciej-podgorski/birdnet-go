@@ -14,6 +14,15 @@ import (
 // processData processes the given audio data to detect bird species, logs the detected species
 // and optionally saves the audio clip if a bird species is detected above the configured threshold.
 func ProcessData(bn *birdnet.BirdNET, data []byte, startTime time.Time, source string) error {
+	// Log which instance is being used for this source
+	instanceID := "unknown"
+	for _, instance := range birdnet.ListInstances() {
+		if bn == birdnet.GetInstance(instance) {
+			instanceID = instance
+			break
+		}
+	}
+
 	// get current time to track processing time
 	predictStart := time.Now()
 

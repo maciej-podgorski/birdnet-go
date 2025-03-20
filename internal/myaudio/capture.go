@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
-	"github.com/fatih/color"
 	"github.com/gen2brain/malgo"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -265,43 +263,7 @@ func ReconfigureRTSPStreams(settings *conf.Settings, wg *sync.WaitGroup, quitCha
 	}
 }
 
-// initializeBuffersForSource handles the initialization of analysis and capture buffers for a given source
-func initializeBuffersForSource(sourceID string) error {
-	var abExists, cbExists bool
-
-	// Check if analysis buffer exists
-	abMutex.RLock()
-	_, abExists = analysisBuffers[sourceID]
-	abMutex.RUnlock()
-
-	// Check if capture buffer exists
-	cbMutex.RLock()
-	_, cbExists = captureBuffers[sourceID]
-	cbMutex.RUnlock()
-
-	// Initialize analysis buffer if it doesn't exist
-	if !abExists {
-		if err := AllocateAnalysisBuffer(conf.BufferSize*3, sourceID); err != nil {
-			return fmt.Errorf("failed to initialize analysis buffer: %w", err)
-		}
-	}
-
-	// Initialize capture buffer if it doesn't exist
-	if !cbExists {
-		if err := AllocateCaptureBuffer(60, conf.SampleRate, conf.BitDepth/8, sourceID); err != nil {
-			// Clean up the analysis buffer if we just created it and capture buffer init fails
-			if !abExists {
-				if cleanupErr := RemoveAnalysisBuffer(sourceID); cleanupErr != nil {
-					log.Printf("❌ Failed to cleanup analysis buffer after capture buffer init failure for %s: %v", sourceID, cleanupErr)
-				}
-			}
-			return fmt.Errorf("failed to initialize capture buffer: %w", err)
-		}
-	}
-
-	return nil
-}
-
+// CaptureAudio captures audio from the specified device.
 func CaptureAudio(settings *conf.Settings, wg *sync.WaitGroup, quitChan, restartChan chan struct{}, audioLevelChan chan AudioLevelData) {
 	// If no RTSP URLs and no audio device configured, return early
 	if len(settings.Realtime.RTSP.URLs) == 0 && settings.Realtime.Audio.Source == "" {
@@ -325,6 +287,9 @@ func CaptureAudio(settings *conf.Settings, wg *sync.WaitGroup, quitChan, restart
 	// Set the BirdNET instance for analysis
 	if bn := birdnet.GetGlobalInstance(); bn != nil {
 		service.SetBirdNET(bn)
+
+		// Also register the default instance
+		service.RegisterModelInstance("default", bn)
 	} else {
 		log.Printf("⚠️ BirdNET instance not available, analysis buffer monitors will not be started")
 	}
@@ -542,173 +507,6 @@ func hexToASCII(hexStr string) (string, error) {
 		return "", err // return the error if hex decoding fails
 	}
 	return string(bytes), nil
-}
-
-func captureAudioMalgo(settings *conf.Settings, source captureSource, wg *sync.WaitGroup, quitChan, restartChan chan struct{}, audioLevelChan chan AudioLevelData) {
-	wg.Add(1)
-	defer func() {
-		wg.Done()
-	}()
-
-	if settings.Debug {
-		fmt.Println("Initializing context")
-	}
-
-	// if Linux set malgo.BackendAlsa, else set nil for auto select
-	var backend malgo.Backend
-	switch runtime.GOOS {
-	case "linux":
-		backend = malgo.BackendAlsa
-	case "windows":
-		backend = malgo.BackendWasapi
-	case "darwin":
-		backend = malgo.BackendCoreaudio
-	}
-
-	malgoCtx, err := malgo.InitContext([]malgo.Backend{backend}, malgo.ContextConfig{}, func(message string) {
-		if settings.Debug {
-			fmt.Print(message)
-		}
-	})
-	if err != nil {
-		color.New(color.FgHiYellow).Fprintln(os.Stderr, "❌ context init failed:", err)
-		return
-	}
-	defer malgoCtx.Uninit() //nolint:errcheck // We handle errors in the caller
-
-	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
-	deviceConfig.Capture.Format = malgo.FormatS16
-	deviceConfig.Capture.Channels = conf.NumChannels
-	deviceConfig.SampleRate = conf.SampleRate
-	deviceConfig.Alsa.NoMMap = 1
-	deviceConfig.Capture.DeviceID = source.Pointer
-
-	// Initialize the filter chain
-	if err := InitializeFilterChain(settings); err != nil {
-		log.Printf("❌ Error initializing filter chain: %v", err)
-	}
-
-	var captureDevice *malgo.Device
-
-	onReceiveFrames := func(pSample2, pSamples []byte, framecount uint32) {
-		// Apply audio EQ filters if enabled
-		if settings.Realtime.Audio.Equalizer.Enabled {
-			err := ApplyFilters(pSamples)
-			if err != nil {
-				log.Printf("❌ Error applying audio EQ filters: %v", err)
-			}
-		}
-
-		err = WriteToAnalysisBuffer("malgo", pSamples)
-		if err != nil {
-			log.Printf("❌ Error writing to analysis buffer: %v", err)
-		}
-		err = WriteToCaptureBuffer("malgo", pSamples)
-		if err != nil {
-			log.Printf("❌ Error writing to capture buffer: %v", err)
-		}
-
-		// Calculate audio level
-		audioLevelData := calculateAudioLevel(pSamples, "malgo", source.Name)
-
-		// Send level to channel (non-blocking)
-		select {
-		case audioLevelChan <- audioLevelData:
-			// Data sent successfully
-		default:
-			// Channel is full, clear the channel
-			for len(audioLevelChan) > 0 {
-				<-audioLevelChan
-			}
-			// Try to send the new data
-			audioLevelChan <- audioLevelData
-		}
-	}
-
-	// onStopDevice is called when the device stops, either normally or unexpectedly
-	onStopDevice := func() {
-		go func() {
-			select {
-			case <-quitChan:
-				// Quit signal has been received, do not attempt to restart
-				return
-			case <-time.After(100 * time.Millisecond):
-				// Wait a bit before restarting to avoid potential rapid restart loops
-				if settings.Debug {
-					fmt.Println("🔄 Attempting to restart audio device.")
-				}
-				err := captureDevice.Start()
-				if err != nil {
-					log.Printf("❌ Failed to restart audio device: %v", err)
-					log.Println("🔄 Attempting full audio context restart in 1 second.")
-					time.Sleep(1 * time.Second)
-					select {
-					case restartChan <- struct{}{}:
-						// Successfully sent restart signal
-					case <-quitChan:
-						// Application is shutting down, don't send restart signal
-					}
-				} else if settings.Debug {
-					fmt.Println("🔄 Audio device restarted successfully.")
-				}
-			}
-		}()
-	}
-
-	// Device callback to assign function to call when audio data is received
-	deviceCallbacks := malgo.DeviceCallbacks{
-		Data: onReceiveFrames,
-		Stop: onStopDevice,
-	}
-
-	// Initialize the capture device
-	captureDevice, err = malgo.InitDevice(malgoCtx.Context, deviceConfig, deviceCallbacks)
-	if err != nil {
-		color.New(color.FgHiYellow).Fprintln(os.Stderr, "❌ Device initialization failed:", err)
-		conf.PrintUserInfo()
-		return
-	}
-
-	if settings.Debug {
-		fmt.Println("Starting device")
-	}
-	err = captureDevice.Start()
-	if err != nil {
-		color.New(color.FgHiYellow).Fprintln(os.Stderr, "❌ Device start failed:", err)
-		return
-	}
-	defer captureDevice.Stop() //nolint:errcheck // We handle errors in the caller
-
-	if settings.Debug {
-		fmt.Println("Device started")
-	}
-	// print audio device we are attached to
-	color.New(color.FgHiGreen).Printf("Listening on source: %s (%s)\n", source.Name, source.ID)
-
-	// Now, instead of directly waiting on QuitChannel,
-	// check if it's closed in a non-blocking select.
-	// This loop will keep running until QuitChannel is closed.
-	for {
-		select {
-		case <-quitChan:
-			// QuitChannel was closed, clean up and return.
-			//if settings.Debug {
-			fmt.Println("🛑 Stopping audio capture due to quit signal.")
-			//}
-			time.Sleep(100 * time.Millisecond)
-			return
-		case <-restartChan:
-			// Handle restart signal
-			if settings.Debug {
-				fmt.Println("🔄 Restarting audio capture.")
-			}
-			return
-		default:
-			// Do nothing and continue with the loop.
-			// This default case prevents blocking if quitChan is not closed yet.
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
 }
 
 // calculateAudioLevel calculates the RMS (Root Mean Square) of the audio samples

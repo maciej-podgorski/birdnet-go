@@ -19,24 +19,6 @@ import (
 	"github.com/tphakala/go-tflite/delegates/xnnpack"
 )
 
-// Global BirdNET instance
-var globalInstance *BirdNET
-var globalInstanceMu sync.Mutex
-
-// SetGlobalInstance sets the global BirdNET instance
-func SetGlobalInstance(bn *BirdNET) {
-	globalInstanceMu.Lock()
-	defer globalInstanceMu.Unlock()
-	globalInstance = bn
-}
-
-// GetGlobalInstance returns the global BirdNET instance
-func GetGlobalInstance() *BirdNET {
-	globalInstanceMu.Lock()
-	defer globalInstanceMu.Unlock()
-	return globalInstance
-}
-
 // Embedded TensorFlow Lite model data.
 //
 //go:embed data/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite
@@ -64,6 +46,62 @@ type BirdNET struct {
 	RangeInterpreter    *tflite.Interpreter
 	Settings            *conf.Settings
 	mu                  sync.Mutex
+}
+
+// Global BirdNET instance
+var globalInstance *BirdNET
+var globalInstanceMu sync.Mutex
+
+// Registry for multiple BirdNET instances
+var instanceRegistry = make(map[string]*BirdNET)
+var registryMu sync.Mutex
+
+// SetGlobalInstance sets the global BirdNET instance
+func SetGlobalInstance(bn *BirdNET) {
+	globalInstanceMu.Lock()
+	defer globalInstanceMu.Unlock()
+	globalInstance = bn
+}
+
+// GetGlobalInstance returns the global BirdNET instance
+func GetGlobalInstance() *BirdNET {
+	globalInstanceMu.Lock()
+	defer globalInstanceMu.Unlock()
+	return globalInstance
+}
+
+// RegisterInstance adds a BirdNET instance to the registry with a given ID
+func RegisterInstance(id string, bn *BirdNET) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	instanceRegistry[id] = bn
+}
+
+// GetInstance returns a BirdNET instance from the registry by ID
+// Returns nil if no instance is found with that ID
+func GetInstance(id string) *BirdNET {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	return instanceRegistry[id]
+}
+
+// ListInstances returns a list of available instance IDs
+func ListInstances() []string {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	var ids []string
+	for id := range instanceRegistry {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// RemoveInstance removes a BirdNET instance from the registry
+func RemoveInstance(id string) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	delete(instanceRegistry, id)
 }
 
 // NewBirdNET initializes a new BirdNET instance with given settings.
