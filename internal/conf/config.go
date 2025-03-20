@@ -585,3 +585,19 @@ func (s *Settings) GetWeatherSettings() (provider string, openweather OpenWeathe
 	// Default to YrNo if nothing is configured
 	return "yrno", OpenWeatherSettings{}
 }
+
+// AudioConfig for audio capture settings
+type AudioConfig struct {
+	Sources []AudioSourceConfig `json:"sources" yaml:"sources"`
+	// Legacy field - will be deprecated
+	Source    string            `json:"source" yaml:"source"`
+	Equalizer EqualizerSettings `json:"equalizer" yaml:"equalizer"`
+}
+
+// AudioSourceConfig defines an individual audio capture source
+type AudioSourceConfig struct {
+	ID        string            `json:"id" yaml:"id"`
+	Name      string            `json:"name" yaml:"name"`
+	Enabled   bool              `json:"enabled" yaml:"enabled"`
+	Equalizer EqualizerSettings `json:"equalizer" yaml:"equalizer"`
+}

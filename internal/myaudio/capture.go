@@ -307,42 +307,42 @@ func CaptureAudio(settings *conf.Settings, wg *sync.WaitGroup, quitChan, restart
 		return
 	}
 
-	// Initialize buffers for RTSP sources
-	if len(settings.Realtime.RTSP.URLs) > 0 {
-		for _, url := range settings.Realtime.RTSP.URLs {
-			if err := initializeBuffersForSource(url); err != nil {
-				log.Printf("❌ Failed to initialize buffers for RTSP source %s: %v", url, err)
-				continue
-			}
+	// Add to the wait group
+	wg.Add(1)
 
-			activeStreams.Store(url, true)
-			go CaptureAudioRTSP(url, settings.Realtime.RTSP.Transport, wg, quitChan, restartChan, audioLevelChan)
-		}
+	// Create a new audio capture service
+	service, err := NewAudioCaptureService(settings)
+	if err != nil {
+		log.Printf("❌ Failed to create audio capture service: %v", err)
+		wg.Done() // Signal we're done if we failed
+		return
 	}
 
-	// Handle sound card source if configured
-	if settings.Realtime.Audio.Source != "" {
-		// Validate audio device
-		if err := ValidateAudioDevice(settings); err != nil {
-			log.Printf("⚠️ Audio device validation failed: %v", err)
-			return
-		}
+	// Connect external channels to the service
+	service.ConnectExternalChannels(restartChan)
 
-		selectedSource, err := selectCaptureSource(settings)
-		if err != nil {
-			log.Printf("❌ Audio device selection failed: %v", err)
-			return
+	// Forward audio level data to the caller's channel
+	go func() {
+		for levelData := range service.GetAudioLevelChannel() {
+			audioLevelChan <- levelData
 		}
+	}()
 
-		// Initialize buffers for local audio device
-		if err := initializeBuffersForSource("malgo"); err != nil {
-			log.Printf("❌ Failed to initialize buffers for device capture: %v", err)
-			return
-		}
-
-		// Device audio capture
-		go captureAudioMalgo(settings, selectedSource, wg, quitChan, restartChan, audioLevelChan)
+	// Start the service
+	if err := service.Start(); err != nil {
+		log.Printf("❌ Failed to start audio capture service: %v", err)
+		wg.Done() // Signal we're done if we failed
+		return
 	}
+
+	// Wait for quit signal in a separate goroutine
+	go func() {
+		<-quitChan
+		// Stop the service
+		service.Stop()
+		// Signal that capture has completed
+		wg.Done()
+	}()
 }
 
 // isHardwareDevice checks if the device ID indicates a hardware device
