@@ -19,6 +19,24 @@ import (
 	"github.com/tphakala/go-tflite/delegates/xnnpack"
 )
 
+// Global BirdNET instance
+var globalInstance *BirdNET
+var globalInstanceMu sync.Mutex
+
+// SetGlobalInstance sets the global BirdNET instance
+func SetGlobalInstance(bn *BirdNET) {
+	globalInstanceMu.Lock()
+	defer globalInstanceMu.Unlock()
+	globalInstance = bn
+}
+
+// GetGlobalInstance returns the global BirdNET instance
+func GetGlobalInstance() *BirdNET {
+	globalInstanceMu.Lock()
+	defer globalInstanceMu.Unlock()
+	return globalInstance
+}
+
 // Embedded TensorFlow Lite model data.
 //
 //go:embed data/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite

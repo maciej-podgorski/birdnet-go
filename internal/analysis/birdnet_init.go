@@ -19,6 +19,9 @@ func initializeBirdNET(settings *conf.Settings) error {
 			return fmt.Errorf("failed to initialize BirdNET: %w", err)
 		}
 
+		// Set the global instance
+		birdnet.SetGlobalInstance(bn)
+
 		// Initialize included species list
 		if err := birdnet.BuildRangeFilter(bn); err != nil {
 			return fmt.Errorf("failed to initialize BirdNET: %w", err)

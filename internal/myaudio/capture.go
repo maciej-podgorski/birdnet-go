@@ -15,6 +15,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/gen2brain/malgo"
+	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
@@ -320,6 +321,13 @@ func CaptureAudio(settings *conf.Settings, wg *sync.WaitGroup, quitChan, restart
 
 	// Connect external channels to the service
 	service.ConnectExternalChannels(restartChan)
+
+	// Set the BirdNET instance for analysis
+	if bn := birdnet.GetGlobalInstance(); bn != nil {
+		service.SetBirdNET(bn)
+	} else {
+		log.Printf("⚠️ BirdNET instance not available, analysis buffer monitors will not be started")
+	}
 
 	// Forward audio level data to the caller's channel
 	go func() {
