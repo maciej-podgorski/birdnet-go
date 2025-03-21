@@ -4,6 +4,8 @@
 
 The `capture` package provides cross-platform audio device management and capture functionality for the BirdNet-Go application. It abstracts hardware interactions through the miniaudio/malgo library to provide a consistent interface across different operating systems (Linux, macOS, and Windows).
 
+This package is part of the larger [audio system](../README.md) which provides comprehensive audio processing capabilities for the BirdNet-Go application.
+
 ## Key Components
 
 ### Adapters

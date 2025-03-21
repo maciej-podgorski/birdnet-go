@@ -19,10 +19,28 @@ type CaptureBuffer struct {
 	startTime      time.Time
 	initialized    bool
 	mu             sync.Mutex
+	logger         Logger
+	timeProvider   TimeProvider
 }
 
-// NewCaptureBuffer creates a new capture buffer.
+// NewCaptureBuffer creates a new capture buffer with default dependencies.
 func NewCaptureBuffer(sampleRate, channels uint32, duration time.Duration) *CaptureBuffer {
+	return NewCaptureBufferWithDeps(
+		sampleRate,
+		channels,
+		duration,
+		&StandardLogger{},
+		&RealTimeProvider{},
+	)
+}
+
+// NewCaptureBufferWithDeps creates a new capture buffer with custom dependencies.
+func NewCaptureBufferWithDeps(
+	sampleRate, channels uint32,
+	duration time.Duration,
+	logger Logger,
+	timeProvider TimeProvider,
+) *CaptureBuffer {
 	// Calculate buffer parameters
 	bytesPerSample := 2 // Assuming 16-bit samples
 	bytesPerSecond := int(sampleRate*channels) * bytesPerSample
@@ -40,6 +58,8 @@ func NewCaptureBuffer(sampleRate, channels uint32, duration time.Duration) *Capt
 		bufferSize:     alignedBufferSize,
 		bufferDuration: duration,
 		initialized:    false,
+		logger:         logger,
+		timeProvider:   timeProvider,
 	}
 }
 
@@ -54,7 +74,7 @@ func (cb *CaptureBuffer) Write(data []byte) (bytesWritten int, err error) {
 
 	if !cb.initialized {
 		// Initialize the buffer's start time when first data arrives
-		cb.startTime = time.Now()
+		cb.startTime = cb.timeProvider.Now()
 		cb.initialized = true
 	}
 
@@ -75,7 +95,7 @@ func (cb *CaptureBuffer) Write(data []byte) (bytesWritten int, err error) {
 
 	// If buffer has wrapped around, adjust start time to maintain accurate timestamps
 	if cb.writeIndex <= prevWriteIndex && bytesWritten > 0 {
-		cb.startTime = time.Now().Add(-cb.bufferDuration)
+		cb.startTime = cb.timeProvider.Now().Add(-cb.bufferDuration)
 	}
 
 	return bytesWritten, nil
@@ -157,7 +177,7 @@ func (cb *CaptureBuffer) ReadSegment(requestedStartTime time.Time, durationSecon
 		endIndex %= cb.bufferSize
 
 		// Check if we have the requested data timeframe
-		currentTime := time.Now()
+		currentTime := cb.timeProvider.Now()
 		if currentTime.After(requestedEndTime) {
 			// Extract the segment
 			var segment []byte
@@ -182,8 +202,8 @@ func (cb *CaptureBuffer) ReadSegment(requestedStartTime time.Time, durationSecon
 
 		cb.mu.Unlock()
 
-		// Wait for more data
-		time.Sleep(time.Second)
+		// Wait for more data using timeProvider for testability
+		cb.timeProvider.Sleep(time.Second)
 	}
 
 	return nil, errors.New("timeout waiting for data")

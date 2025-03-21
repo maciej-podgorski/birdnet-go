@@ -9,20 +9,41 @@ import (
 	"github.com/smallnest/ringbuffer"
 )
 
-// AnalysisBuffer implements the AnalysisBuffer interface for audio analysis.
+// AnalysisBuffer implements the AnalysisBufferInterface for audio analysis.
 type AnalysisBuffer struct {
-	buffer     *ringbuffer.RingBuffer
-	prevData   []byte
-	sampleRate uint32
-	channels   uint32
-	threshold  int
+	buffer          RingBufferInterface
+	prevData        []byte
+	sampleRate      uint32
+	channels        uint32
+	threshold       int
+	overlapFraction float64
 
 	warningCounter int
 	mu             sync.RWMutex
+	logger         Logger
+	timeProvider   TimeProvider
 }
 
-// NewAnalysisBuffer creates a new analysis buffer.
+// NewAnalysisBuffer creates a new analysis buffer with default dependencies.
 func NewAnalysisBuffer(sampleRate, channels uint32, duration time.Duration) *AnalysisBuffer {
+	return NewAnalysisBufferWithDeps(
+		sampleRate,
+		channels,
+		duration,
+		func(size int) RingBufferInterface { return ringbuffer.New(size) },
+		&StandardLogger{},
+		&RealTimeProvider{},
+	)
+}
+
+// NewAnalysisBufferWithDeps creates a new analysis buffer with custom dependencies.
+func NewAnalysisBufferWithDeps(
+	sampleRate, channels uint32,
+	duration time.Duration,
+	ringBufferFactory func(size int) RingBufferInterface,
+	logger Logger,
+	timeProvider TimeProvider,
+) *AnalysisBuffer {
 	// Calculate buffer size based on duration, sample rate, channels and 2 bytes per sample
 	bytesPerSecond := int(sampleRate * channels * 2)
 	bufferSize := bytesPerSecond * int(duration.Seconds())
@@ -31,12 +52,15 @@ func NewAnalysisBuffer(sampleRate, channels uint32, duration time.Duration) *Ana
 	threshold := bufferSize * 3 / 4
 
 	return &AnalysisBuffer{
-		buffer:         ringbuffer.New(bufferSize),
-		prevData:       nil,
-		sampleRate:     sampleRate,
-		channels:       channels,
-		threshold:      threshold,
-		warningCounter: 0,
+		buffer:          ringBufferFactory(bufferSize),
+		prevData:        nil,
+		sampleRate:      sampleRate,
+		channels:        channels,
+		threshold:       threshold,
+		overlapFraction: 0.25, // Default value, can be made configurable
+		warningCounter:  0,
+		logger:          logger,
+		timeProvider:    timeProvider,
 	}
 }
 
@@ -63,7 +87,7 @@ func (ab *AnalysisBuffer) Write(data []byte) (int, error) {
 		ab.warningCounter++
 		// Only log every 32nd warning to avoid flooding logs
 		if ab.warningCounter%32 == 1 {
-			fmt.Printf("⚠️ Analysis buffer is %.2f%% full (used: %d/%d bytes)\n",
+			ab.logger.Warn("Analysis buffer is %.2f%% full (used: %d/%d bytes)",
 				capacityUsed*100, ab.buffer.Length(), capacity)
 		}
 	}
@@ -80,7 +104,7 @@ func (ab *AnalysisBuffer) Write(data []byte) (int, error) {
 
 		if lastErr == nil {
 			if n < len(data) {
-				fmt.Printf("⚠️ Only wrote %d of %d bytes to buffer (capacity: %d, free: %d)\n",
+				ab.logger.Warn("Only wrote %d of %d bytes to buffer (capacity: %d, free: %d)",
 					n, len(data), capacity, ab.buffer.Free())
 
 				// Partial write is still a success
@@ -92,19 +116,19 @@ func (ab *AnalysisBuffer) Write(data []byte) (int, error) {
 		}
 
 		// Log detailed buffer state on error
-		fmt.Printf("⚠️ Buffer has %d/%d bytes free (%d bytes used), tried to write %d bytes\n",
+		ab.logger.Warn("Buffer has %d/%d bytes free (%d bytes used), tried to write %d bytes",
 			ab.buffer.Free(), capacity, ab.buffer.Length(), len(data))
 
-		if errors.Is(lastErr, ringbuffer.ErrIsFull) {
-			fmt.Printf("⚠️ Buffer is full. Waiting before retry %d/%d\n", retry+1, maxRetries)
+		if errors.Is(lastErr, errors.New("buffer is full")) { // Replace with actual error from ringbuffer
+			ab.logger.Warn("Buffer is full. Waiting before retry %d/%d", retry+1, maxRetries)
 		} else {
-			fmt.Printf("❌ Unexpected error writing to buffer: %v\n", lastErr)
+			ab.logger.Error("Unexpected error writing to buffer: %v", lastErr)
 		}
 
 		if retry < maxRetries-1 {
 			// Release lock during sleep
 			ab.mu.Unlock()
-			time.Sleep(retryDelay)
+			ab.timeProvider.Sleep(retryDelay)
 			ab.mu.Lock()
 		}
 	}
@@ -120,10 +144,7 @@ func (ab *AnalysisBuffer) Read(p []byte) (int, error) {
 	defer ab.mu.Unlock()
 
 	// Calculate read size based on the overlap
-	// TODO: FIXME we should calculate overlap based on settings.birdnet.overlap
-	// TODO: FIXME we should also calculate the read size based on the overlap
-	var overlapFraction = 0.25
-	readSize := len(p) * (1 - int(overlapFraction))
+	readSize := int(float64(len(p)) * (1.0 - ab.overlapFraction))
 
 	// Calculate the number of bytes in the buffer
 	bytesAvailable := ab.buffer.Length()
@@ -192,4 +213,14 @@ func (ab *AnalysisBuffer) SampleRate() uint32 {
 // Channels returns the number of channels in the buffer.
 func (ab *AnalysisBuffer) Channels() uint32 {
 	return ab.channels
+}
+
+// SetOverlapFraction sets the overlap fraction for the buffer.
+func (ab *AnalysisBuffer) SetOverlapFraction(fraction float64) {
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+
+	if fraction >= 0.0 && fraction < 1.0 {
+		ab.overlapFraction = fraction
+	}
 }

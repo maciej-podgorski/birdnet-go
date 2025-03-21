@@ -3,34 +3,52 @@ package buffer
 import (
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
-
-	"github.com/smallnest/ringbuffer"
-	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
 // BufferManager handles the management of analysis and capture buffers
 type BufferManager struct {
 	// Analysis buffer management
-	analysisBuffers        map[string]*ringbuffer.RingBuffer
-	prevAnalysisData       map[string][]byte
-	analysisWarningCounter map[string]int
-	analysisMutex          sync.RWMutex
+	analysisBuffers map[string]AnalysisBufferInterface
+	analysisMutex   sync.RWMutex
 
 	// Capture buffer management
-	captureBuffers map[string]*CaptureBuffer
+	captureBuffers map[string]CaptureBufferInterface
 	captureMutex   sync.RWMutex
+
+	// Dependencies
+	logger        Logger
+	timeProvider  TimeProvider
+	config        *BufferConfig
+	bufferFactory BufferFactoryInterface
 }
 
-// NewBufferManager creates a new buffer manager
+// NewBufferManager creates a new buffer manager with default dependencies
 func NewBufferManager() *BufferManager {
+	factory := NewBufferFactory()
+	return NewBufferManagerWithDeps(
+		factory.logger,
+		factory.timeProvider,
+		factory.config,
+		factory,
+	)
+}
+
+// NewBufferManagerWithDeps creates a new buffer manager with custom dependencies
+func NewBufferManagerWithDeps(
+	logger Logger,
+	timeProvider TimeProvider,
+	config *BufferConfig,
+	bufferFactory BufferFactoryInterface,
+) *BufferManager {
 	return &BufferManager{
-		analysisBuffers:        make(map[string]*ringbuffer.RingBuffer),
-		prevAnalysisData:       make(map[string][]byte),
-		analysisWarningCounter: make(map[string]int),
-		captureBuffers:         make(map[string]*CaptureBuffer),
+		analysisBuffers: make(map[string]AnalysisBufferInterface),
+		captureBuffers:  make(map[string]CaptureBufferInterface),
+		logger:          logger,
+		timeProvider:    timeProvider,
+		config:          config,
+		bufferFactory:   bufferFactory,
 	}
 }
 
@@ -44,16 +62,15 @@ func (bm *BufferManager) AllocateAnalysisBuffer(capacity int, source string) err
 		return fmt.Errorf("empty source name provided")
 	}
 
-	settings := conf.Setting()
+	// Create a new analysis buffer
+	ab := bm.bufferFactory.CreateAnalysisBuffer(
+		uint32(bm.config.SampleRate),
+		1, // Assuming mono for simplicity
+		bm.config.DefaultAnalysisDuration,
+	)
 
-	// Set overlapSize based on user setting in seconds
-	overlapSize := int(settings.BirdNET.Overlap * float64(conf.SampleRate) * float64(conf.BitDepth/8))
-	_ = conf.BufferSize - overlapSize // Calculate but not used directly in this method
-
-	// Initialize the analysis ring buffer
-	ab := ringbuffer.New(capacity)
 	if ab == nil {
-		return fmt.Errorf("failed to allocate ring buffer for source: %s", source)
+		return fmt.Errorf("failed to create analysis buffer for source: %s", source)
 	}
 
 	// Update manager state safely
@@ -62,14 +79,10 @@ func (bm *BufferManager) AllocateAnalysisBuffer(capacity int, source string) err
 
 	// Check if buffer already exists
 	if _, exists := bm.analysisBuffers[source]; exists {
-		ab.Reset() // Clean up the new buffer since we won't use it
-		return fmt.Errorf("ring buffer already exists for source: %s", source)
+		return fmt.Errorf("analysis buffer already exists for source: %s", source)
 	}
 
 	bm.analysisBuffers[source] = ab
-	bm.prevAnalysisData[source] = nil
-	bm.analysisWarningCounter[source] = 0
-
 	return nil
 }
 
@@ -80,17 +93,16 @@ func (bm *BufferManager) RemoveAnalysisBuffer(source string) error {
 
 	ab, exists := bm.analysisBuffers[source]
 	if !exists {
-		return fmt.Errorf("no ring buffer found for source: %s", source)
+		return fmt.Errorf("no analysis buffer found for source: %s", source)
 	}
 
 	// Clean up the buffer
-	ab.Reset()
+	if err := ab.Reset(); err != nil {
+		return fmt.Errorf("error resetting analysis buffer: %w", err)
+	}
 
-	// Remove from all maps
+	// Remove from the map
 	delete(bm.analysisBuffers, source)
-	delete(bm.prevAnalysisData, source)
-	delete(bm.analysisWarningCounter, source)
-
 	return nil
 }
 
@@ -110,18 +122,15 @@ func (bm *BufferManager) AllocateCaptureBuffer(durationSeconds, sampleRate, byte
 		return fmt.Errorf("empty source name provided")
 	}
 
-	// Calculate buffer size in bytes
-	bufferSize := durationSeconds * sampleRate * bytesPerSample
+	// Create a new CaptureBuffer using factory
+	cb := bm.bufferFactory.CreateCaptureBuffer(
+		uint32(sampleRate),
+		1, // Assuming mono for simplicity
+		time.Duration(durationSeconds)*time.Second,
+	)
 
-	// Create a new CaptureBuffer
-	cb := &CaptureBuffer{
-		data:           make([]byte, bufferSize),
-		sampleRate:     uint32(sampleRate),
-		bytesPerSample: bytesPerSample,
-		bufferSize:     bufferSize,
-		bufferDuration: time.Duration(durationSeconds) * time.Second,
-		startTime:      time.Now(),
-		initialized:    true,
+	if cb == nil {
+		return fmt.Errorf("failed to create capture buffer for source: %s", source)
 	}
 
 	// Update manager state safely
@@ -134,7 +143,6 @@ func (bm *BufferManager) AllocateCaptureBuffer(durationSeconds, sampleRate, byte
 	}
 
 	bm.captureBuffers[source] = cb
-
 	return nil
 }
 
@@ -143,24 +151,28 @@ func (bm *BufferManager) RemoveCaptureBuffer(source string) error {
 	bm.captureMutex.Lock()
 	defer bm.captureMutex.Unlock()
 
-	_, exists := bm.captureBuffers[source]
+	cb, exists := bm.captureBuffers[source]
 	if !exists {
 		return fmt.Errorf("no capture buffer found for source: %s", source)
 	}
 
+	// Clean up the buffer
+	if err := cb.Reset(); err != nil {
+		return fmt.Errorf("error resetting capture buffer: %w", err)
+	}
+
 	// Remove the buffer entry
 	delete(bm.captureBuffers, source)
-
 	return nil
 }
 
-// WriteToAnalysisBuffer writes audio data into the ring buffer for a given stream
+// WriteToAnalysisBuffer writes audio data into the analysis buffer for a given stream
 func (bm *BufferManager) WriteToAnalysisBuffer(stream string, data []byte) error {
 	if len(data) == 0 {
 		return errors.New("empty data provided")
 	}
 
-	// First get the buffer with a read lock
+	// Get the buffer with a read lock first
 	bm.analysisMutex.RLock()
 	ab, exists := bm.analysisBuffers[stream]
 	bm.analysisMutex.RUnlock()
@@ -169,123 +181,52 @@ func (bm *BufferManager) WriteToAnalysisBuffer(stream string, data []byte) error
 		return fmt.Errorf("no analysis buffer found for stream: %s", stream)
 	}
 
-	// Get buffer capacity information (safe since we're not modifying it)
-	capacity := ab.Capacity()
-	if capacity == 0 {
-		return fmt.Errorf("analysis buffer for stream %s has zero capacity", stream)
+	// Delegate to the buffer's Write method
+	_, err := ab.Write(data)
+	if err != nil {
+		return fmt.Errorf("error writing to analysis buffer: %w", err)
 	}
 
-	// Check buffer capacity and update warning counter if needed
-	const warningCapacityThreshold = 0.9 // 90% full
-	capacityUsed := float64(ab.Length()) / float64(capacity)
-
-	if capacityUsed > warningCapacityThreshold {
-		// Use a separate lock for the warning counter to minimize lock contention
-		bm.analysisMutex.Lock()
-		counter := bm.analysisWarningCounter[stream]
-		counter++
-		bm.analysisWarningCounter[stream] = counter
-		bm.analysisMutex.Unlock()
-
-		if counter%32 == 1 {
-			log.Printf("⚠️ Analysis buffer for stream %s is %.2f%% full (used: %d/%d bytes)",
-				stream, capacityUsed*100, ab.Length(), capacity)
-		}
-	}
-
-	// Write data to the ring buffer with multiple retries on failure
-	const maxRetries = 3
-	const retryDelay = time.Millisecond * 10
-
-	var lastErr error
-	for retry := 0; retry < maxRetries; retry++ {
-		// Lock only for the write operation
-		bm.analysisMutex.Lock()
-		n, err := ab.Write(data)
-		bm.analysisMutex.Unlock()
-
-		if err == nil {
-			if n < len(data) {
-				log.Printf("⚠️ Only wrote %d of %d bytes to buffer for stream %s (capacity: %d, free: %d)",
-					n, len(data), stream, capacity, ab.Free())
-
-				// Partial write is still a success, but we should log it
-				return nil
-			}
-
-			// Full write succeeded
-			return nil
-		}
-
-		// Save the last error
-		lastErr = err
-
-		// Log detailed buffer state
-		log.Printf("⚠️ Analysis buffer for stream %s has %d/%d bytes free (%d bytes used), tried to write %d bytes",
-			stream, ab.Free(), capacity, ab.Length(), len(data))
-
-		if errors.Is(err, ringbuffer.ErrIsFull) {
-			log.Printf("⚠️ Analysis buffer for stream %s is full. Waiting before retry %d/%d", stream, retry+1, maxRetries)
-		} else {
-			log.Printf("❌ Unexpected error writing to analysis buffer for stream %s: %v", stream, err)
-		}
-
-		if retry < maxRetries-1 {
-			time.Sleep(retryDelay)
-		}
-	}
-
-	// If we've reached this point, we've failed all retries
-	return fmt.Errorf("failed to write to analysis buffer for stream %s after %d attempts: %w",
-		stream, maxRetries, lastErr)
+	return nil
 }
 
-// ReadFromAnalysisBuffer reads a sliding chunk of audio data from the ring buffer for a given stream
-func (bm *BufferManager) ReadFromAnalysisBuffer(stream string) ([]byte, error) {
-	// Single lock for the entire read operation to ensure consistency
-	bm.analysisMutex.Lock()
-	defer bm.analysisMutex.Unlock()
-
-	// Get the ring buffer for the given stream
+// ReadFromAnalysisBuffer reads a sliding chunk of audio data from the buffer for a given stream
+func (bm *BufferManager) ReadFromAnalysisBuffer(stream string, optionalConfig *BufferConfig) ([]byte, error) {
+	// Get the buffer with a read lock
+	bm.analysisMutex.RLock()
 	ab, exists := bm.analysisBuffers[stream]
+	bm.analysisMutex.RUnlock()
+
 	if !exists {
 		return nil, fmt.Errorf("no analysis buffer found for stream: %s", stream)
 	}
 
-	// Calculate read size based on user setting (must be recalculated here to handle setting changes)
-	settings := conf.Setting()
-	overlapSize := int(settings.BirdNET.Overlap * float64(conf.SampleRate) * float64(conf.BitDepth/8))
-	readSize := conf.BufferSize - overlapSize
-
-	// Calculate the number of bytes written to the buffer
-	bytesWritten := ab.Length()
-	if bytesWritten < readSize {
-		return nil, nil
+	// Check if the buffer is ready for analysis
+	if !ab.ReadyForAnalysis() {
+		return nil, nil // Not enough data yet
 	}
 
-	// Create a slice to hold the data we're going to read
-	data := make([]byte, readSize)
-	// Read data from the ring buffer
-	bytesRead, err := ab.Read(data)
+	// Use provided config or fall back to default
+	config := bm.config
+	if optionalConfig != nil {
+		config = optionalConfig
+	}
+
+	// Calculate the buffer size we need based on config
+	bufferSize := config.BufferSize
+	data := make([]byte, bufferSize)
+
+	// Delegate to the buffer's Read method
+	n, err := ab.Read(data)
 	if err != nil {
-		return nil, fmt.Errorf("error reading %d bytes from analysis buffer for stream: %s", bytesRead, stream)
+		return nil, fmt.Errorf("error reading from analysis buffer: %w", err)
 	}
 
-	// Join with previous data to ensure we're processing chunkSize bytes
-	var fullData []byte
-	bm.prevAnalysisData[stream] = append(bm.prevAnalysisData[stream], data...)
-	fullData = bm.prevAnalysisData[stream]
-	if len(fullData) >= conf.BufferSize {
-		// Update prevData for the next iteration
-		bm.prevAnalysisData[stream] = fullData[readSize:]
-		fullData = fullData[:conf.BufferSize]
-	} else {
-		// If there isn't enough data even after appending, update prevData and return nil
-		bm.prevAnalysisData[stream] = fullData
-		return nil, nil
+	if n == 0 {
+		return nil, nil // Not enough data yet
 	}
 
-	return fullData, nil
+	return data[:n], nil
 }
 
 // WriteToCaptureBuffer adds PCM audio data to the buffer for a given source
@@ -294,7 +235,7 @@ func (bm *BufferManager) WriteToCaptureBuffer(source string, data []byte) error 
 		return errors.New("empty data provided")
 	}
 
-	// First get the buffer with a read lock
+	// Get the buffer with a read lock
 	bm.captureMutex.RLock()
 	cb, exists := bm.captureBuffers[source]
 	bm.captureMutex.RUnlock()
@@ -303,19 +244,18 @@ func (bm *BufferManager) WriteToCaptureBuffer(source string, data []byte) error 
 		return fmt.Errorf("no capture buffer found for source: %s", source)
 	}
 
-	// Write to the buffer with proper locking
-	bm.captureMutex.Lock()
-	defer bm.captureMutex.Unlock()
-
-	if _, err := cb.Write(data); err != nil {
+	// Delegate to the buffer's Write method
+	_, err := cb.Write(data)
+	if err != nil {
 		return fmt.Errorf("failed to write to capture buffer: %w", err)
 	}
+
 	return nil
 }
 
 // ReadSegmentFromCaptureBuffer extracts a segment of audio data from the buffer for a given source
 func (bm *BufferManager) ReadSegmentFromCaptureBuffer(source string, requestedStartTime time.Time, duration int) ([]byte, error) {
-	// First check if the buffer exists with a read lock
+	// Get the buffer with a read lock
 	bm.captureMutex.RLock()
 	cb, exists := bm.captureBuffers[source]
 	bm.captureMutex.RUnlock()
@@ -324,10 +264,7 @@ func (bm *BufferManager) ReadSegmentFromCaptureBuffer(source string, requestedSt
 		return nil, fmt.Errorf("no capture buffer found for source: %s", source)
 	}
 
-	// Read from the buffer with proper locking
-	bm.captureMutex.Lock()
-	defer bm.captureMutex.Unlock()
-
+	// Delegate to the buffer's ReadSegment method
 	return cb.ReadSegment(requestedStartTime, duration)
 }
 
@@ -336,16 +273,21 @@ func (bm *BufferManager) CleanupAllBuffers() {
 	// Clean up analysis buffers
 	bm.analysisMutex.Lock()
 	for sourceID, buffer := range bm.analysisBuffers {
-		buffer.Reset()
+		err := buffer.Reset()
+		if err != nil {
+			bm.logger.Error("error resetting analysis buffer: %w", err)
+		}
 		delete(bm.analysisBuffers, sourceID)
-		delete(bm.prevAnalysisData, sourceID)
-		delete(bm.analysisWarningCounter, sourceID)
 	}
 	bm.analysisMutex.Unlock()
 
 	// Clean up capture buffers
 	bm.captureMutex.Lock()
-	for sourceID := range bm.captureBuffers {
+	for sourceID, buffer := range bm.captureBuffers {
+		err := buffer.Reset()
+		if err != nil {
+			bm.logger.Error("error resetting capture buffer: %w", err)
+		}
 		delete(bm.captureBuffers, sourceID)
 	}
 	bm.captureMutex.Unlock()

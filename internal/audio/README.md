@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `audio` package provides core functionality for audio processing, capture, and analysis for bird sound recognition in the BirdNet-Go application. It serves as the foundation for interacting with audio hardware, managing buffers, and integrating with the BirdNET machine learning model.
+The `audio` package provides core functionality for audio processing, capture, and analysis for bird sound recognition in the BirdNET-Go application. It serves as the foundation for interacting with audio hardware, managing buffers, and integrating with the BirdNET machine learning model.
 
 This package is designed to be cross-platform (Linux, macOS, and Windows) and modular, allowing different audio sources (physical devices and network streams) to be processed through the same pipeline.
 
@@ -24,11 +24,13 @@ The audio system is divided into several subpackages:
 - Provides buffer management for audio data
 - Implements both analysis buffers (for real-time processing) and capture buffers (for recording)
 - Handles thread-safe read/write operations for multiple audio sources
+- See detailed documentation in the [buffer README](buffer/README.md)
 
 ### Model (`internal/audio/model`)
 - Manages BirdNET model instances
 - Maps audio sources to specific model instances
 - Provides a unified interface for analyzing audio with BirdNET
+- See detailed documentation in the [model README](model/README.md)
 
 ## Key Components
 
@@ -92,8 +94,8 @@ The audio package is designed to work across:
 For detailed usage examples of specific components, please refer to the respective subpackage documentation:
 
 - [Capture Package Documentation](capture/README.md) - For audio device capture
-- Buffer Package - For audio buffer management
-- Model Package - For BirdNET model integration
+- [Buffer Package Documentation](buffer/README.md) - For audio buffer management
+- [Model Package Documentation](model/README.md) - For BirdNET model integration
 
 ## Dependencies
 
