@@ -31,6 +31,15 @@ The audio system is divided into several subpackages:
 - Features comprehensive error handling and robust resource management
 - See detailed documentation in the [buffer README](buffer/README.md)
 
+### File (`internal/audio/file`)
+- Provides functionality for reading and processing audio files (.wav, .flac)
+- Offers interfaces for file reading, validation, and information extraction
+- Implements chunk-based audio processing with configurable duration and overlap
+- Features format-specific readers with a factory pattern for extensibility
+- Provides consistent error handling and resource management
+- Supports cross-platform file operations with proper path handling
+- See detailed documentation in the [file README](file/README.md)
+
 ### Model (`internal/audio/model`)
 - Manages BirdNET model instances
 - Maps audio sources to specific model instances
@@ -102,7 +111,7 @@ The audio system follows a layered architecture with clear component responsibil
 
 ### Audio Flow
 
-1. **Audio Sources** → Raw audio from devices (via Capture) or streams (via FFmpegStream)
+1. **Audio Sources** → Raw audio from devices (via Capture), streams (via FFmpegStream), or files (via File package)
 2. **Buffer Manager** → Thread-safe storage in Analysis and Capture buffers
 3. **Model Manager** → Audio processing and analysis using BirdNET
 4. **Application Logic** → Bird detection results handling
@@ -193,7 +202,7 @@ See the [Buffer README](buffer/README.md) for detailed migration steps.
 
 ## Data Flow
 
-1. **Audio Source** → Raw audio data is captured from devices or streams
+1. **Audio Source** → Raw audio data is captured from devices, streams, or loaded from files
 2. **Buffer Manager** → Data is temporarily stored in analysis and capture buffers
 3. **Audio Processor** → Audio is processed (filtered, converted, etc.)
 4. **Model Manager** → Processed audio is sent to BirdNET for analysis
@@ -369,9 +378,38 @@ func cleanup() {
 }
 ```
 
+### Using the File Package
+
+```go
+// Create a file manager
+fileManager := file.NewManager(false) // debug = false
+
+// Define a processor function to handle audio chunks
+processor := func(chunk file.Chunk) error {
+    // Process each chunk of audio data
+    fmt.Printf("Processing chunk at %.2f seconds\n", chunk.StartTime)
+    
+    // Send chunk to buffer manager for analysis
+    if err := bufferManager.WriteToAnalysisBuffer("file_source", chunk.Data); err != nil {
+        return fmt.Errorf("failed to write to analysis buffer: %w", err)
+    }
+    
+    return nil
+}
+
+// Process an audio file in chunks of 3 seconds with 1.5 second overlap
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+err := fileManager.ProcessAudioFile(ctx, "recordings/birdsong.wav", 3.0, 1.5, processor)
+if err != nil {
+    log.Fatalf("Error processing audio file: %v", err)
+}
+```
+
 ## Key Features
 
-- **Device and Stream Support**: Unified handling of both local devices and network streams
+- **Device, Stream, and File Support**: Unified handling of local devices, network streams, and audio files
 - **Cross-Platform Compatibility**: Works on Linux, macOS, and Windows
 - **Modular Design**: Components can be used independently or together
 - **Thread Safety**: All operations are thread-safe for concurrent use
@@ -381,6 +419,8 @@ func cleanup() {
 - **Stream Monitoring**: Automatic recovery of inactive streams
 - **Context-Based Cancellation**: Clean shutdown of all operations
 - **Protocol Support**: RTSP, HLS, HTTP streaming, and local file support
+- **File Format Support**: WAV and FLAC audio file processing
+- **Chunk Processing**: Extract and process audio in fixed-duration chunks with overlap
 - **Audio Export**: Convert PCM data to various formats (MP3, FLAC, AAC, etc.)
 - **Simple Integration**: Direct implementations of audio interfaces using the stream and FFmpeg packages
 - **Factory Functions**: Easy creation of connected components with sensible defaults

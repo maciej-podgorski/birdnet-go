@@ -6,17 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
 
+	"github.com/tphakala/birdnet-go/internal/audio/file"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observation"
 )
 
@@ -28,17 +27,21 @@ func FileAnalysis(settings *conf.Settings, ctx context.Context) error {
 		return err
 	}
 
-	if err := validateAudioFile(settings.Input.Path); err != nil {
+	// Create file manager
+	fileManager := file.NewManager(settings.Debug)
+
+	// Validate the audio file
+	if err := fileManager.ValidateFile(settings.Input.Path); err != nil {
 		return err
 	}
 
 	// Get audio file information
-	audioInfo, err := myaudio.GetAudioInfo(settings.Input.Path)
+	fileInfo, err := fileManager.GetFileInfo(settings.Input.Path)
 	if err != nil {
 		return fmt.Errorf("error getting audio info: %w", err)
 	}
 
-	notes, err := processAudioFile(settings, &audioInfo, ctx)
+	notes, err := processAudioFile(settings, fileManager, &fileInfo, ctx)
 	if err != nil {
 		// Handle cancellation first
 		if errors.Is(err, ErrAnalysisCanceled) {
@@ -56,50 +59,6 @@ func FileAnalysis(settings *conf.Settings, ctx context.Context) error {
 	}
 
 	return writeResults(settings, notes)
-}
-
-// validateAudioFile checks if the provided file path is a valid audio file.
-func validateAudioFile(filePath string) error {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return fmt.Errorf("\033[31m❌ Error accessing file %s: %w\033[0m", filepath.Base(filePath), err)
-	}
-
-	// Check if it's a file (not a directory)
-	if fileInfo.IsDir() {
-		return fmt.Errorf("\033[31m❌ The path %s is a directory, not a file\033[0m", filepath.Base(filePath))
-	}
-
-	// Check if file size is 0
-	if fileInfo.Size() == 0 {
-		return fmt.Errorf("\033[31m❌ File %s is empty (0 bytes)\033[0m", filepath.Base(filePath))
-	}
-
-	// Check file extension (case-insensitive)
-	ext := strings.ToLower(filepath.Ext(filePath))
-	if ext != ".wav" && ext != ".flac" {
-		return fmt.Errorf("\033[31m❌ Invalid audio file %s: unsupported audio format: %s\033[0m", filepath.Base(filePath), filepath.Ext(filePath))
-	}
-
-	// Open the file to check if it's a valid audio file
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("\033[31m❌ Error opening file %s: %w\033[0m", filepath.Base(filePath), err)
-	}
-	defer file.Close()
-
-	// Try to get audio info to validate the file format
-	audioInfo, err := myaudio.GetAudioInfo(filePath)
-	if err != nil {
-		return fmt.Errorf("\033[31m❌ Invalid audio file %s: %w\033[0m", filepath.Base(filePath), err)
-	}
-
-	// Check if the audio duration is valid (greater than 0)
-	if audioInfo.TotalSamples == 0 {
-		return fmt.Errorf("\033[31m❌ File %s contains no samples or is still being written\033[0m", filepath.Base(filePath))
-	}
-
-	return nil
 }
 
 // truncateString truncates a string to fit within maxLen, adding "..." if truncated
@@ -215,9 +174,10 @@ func monitorProgress(ctx context.Context, doneChan chan struct{}, filename strin
 }
 
 // processChunk handles the processing of a single audio chunk
-func processChunk(ctx context.Context, chunk audioChunk, settings *conf.Settings,
+func processChunk(ctx context.Context, chunk fileChunk, settings *conf.Settings,
 	resultChan chan<- []datastore.Note, errorChan chan<- error) error {
 
+	// BirdNET expects float32 data directly, no need to convert to PCM
 	notes, err := bn.ProcessChunk(chunk.Data, chunk.FilePosition)
 	if err != nil {
 		// Block until we can send the error or context is cancelled
@@ -249,7 +209,7 @@ func processChunk(ctx context.Context, chunk audioChunk, settings *conf.Settings
 }
 
 // startWorkers initializes and starts the worker goroutines for audio analysis
-func startWorkers(ctx context.Context, numWorkers int, chunkChan chan audioChunk,
+func startWorkers(ctx context.Context, numWorkers int, chunkChan chan fileChunk,
 	resultChan chan []datastore.Note, errorChan chan error, settings *conf.Settings) {
 
 	for i := 0; i < numWorkers; i++ {
@@ -285,22 +245,45 @@ func startWorkers(ctx context.Context, numWorkers int, chunkChan chan audioChunk
 	}
 }
 
-// Define audioChunk type at package level since it's used by multiple functions
-type audioChunk struct {
+// Define fileChunk type for internal use in this package
+type fileChunk struct {
 	Data         []float32
 	FilePosition time.Time
 }
 
-func processAudioFile(settings *conf.Settings, audioInfo *myaudio.AudioInfo, ctx context.Context) ([]datastore.Note, error) {
-	// Calculate total chunks
-	totalChunks := myaudio.GetTotalChunks(
-		audioInfo.SampleRate,
-		audioInfo.TotalSamples,
-		settings.BirdNET.Overlap,
-	)
+// Calculate total number of chunks based on file info and settings
+func calculateTotalChunks(fileInfo *file.Info, overlap float64) int {
+	// Calculate chunk duration in samples (3 seconds)
+	chunkDuration := 3.0 // seconds
 
-	// Calculate audio duration
-	duration := time.Duration(float64(audioInfo.TotalSamples) / float64(audioInfo.SampleRate) * float64(time.Second))
+	// Calculate stride (distance between chunk starts) in samples
+	// Overlap is in seconds, so the step is (chunkDuration - overlap) seconds
+	stepSamples := int((chunkDuration - overlap) * float64(fileInfo.SampleRate))
+
+	if stepSamples <= 0 {
+		// Invalid step size - overlap is too large
+		return 1
+	}
+
+	// Initialize position to 0
+	position := 0
+
+	// Count chunks by simulating how the reader would process the file
+	chunkCount := 0
+	for position < fileInfo.TotalSamples {
+		chunkCount++
+		position += stepSamples
+	}
+
+	return chunkCount
+}
+
+func processAudioFile(settings *conf.Settings, fileManager file.Manager, fileInfo *file.Info, ctx context.Context) ([]datastore.Note, error) {
+	// Calculate total chunks
+	totalChunks := calculateTotalChunks(fileInfo, settings.BirdNET.Overlap)
+
+	// Calculate audio duration from file info
+	duration := fileInfo.Duration
 
 	// Get filename and truncate if necessary
 	filename := filepath.Base(settings.Input.Path)
@@ -312,11 +295,59 @@ func processAudioFile(settings *conf.Settings, audioInfo *myaudio.AudioInfo, ctx
 	numWorkers := 1
 
 	if settings.Debug {
+		// Calculate the values used in total chunk calculation for debugging
+		chunkDuration := 3.0 // seconds
+		stepSamples := int((chunkDuration - settings.BirdNET.Overlap) * float64(fileInfo.SampleRate))
+		chunkSamples := int(chunkDuration * float64(fileInfo.SampleRate))
+
+		// Simulate the chunk counting process
+		position := 0
+		simulatedChunkCount := 0
+
+		// Print the steps of our calculation
+		fmt.Printf("DEBUG: Calculating total chunks for file of %d samples:\n", fileInfo.TotalSamples)
+		fmt.Printf("DEBUG: Using step size of %d samples (%.2f seconds with %.2f second overlap)\n",
+			stepSamples, chunkDuration, settings.BirdNET.Overlap)
+
+		// Only show first 5 and last 2 steps for long files
+		maxStepsToShow := 7
+		stepsShown := 0
+
+		for position < fileInfo.TotalSamples {
+			simulatedChunkCount++
+
+			// Show detailed steps (limited to avoid spam)
+			if simulatedChunkCount <= 5 ||
+				(fileInfo.TotalSamples-position) <= stepSamples*2 {
+				if stepsShown < maxStepsToShow {
+					fmt.Printf("DEBUG: Chunk %d: position %d, advancing by %d samples\n",
+						simulatedChunkCount, position, stepSamples)
+					stepsShown++
+				}
+			} else if stepsShown == 5 {
+				fmt.Printf("DEBUG: ... (skipping middle steps) ...\n")
+				stepsShown++
+			}
+
+			position += stepSamples
+		}
+
+		fmt.Printf("DEBUG: Total chunks calculated: %d\n", totalChunks)
+
+		// Standard debug information
 		fmt.Printf("DEBUG: Starting analysis with %d total chunks and %d workers\n", totalChunks, numWorkers)
+		fmt.Printf("DEBUG: Sample rate: %d Hz, Channels: %d, Bit depth: %d\n",
+			fileInfo.SampleRate, fileInfo.NumChannels, fileInfo.BitDepth)
+		fmt.Printf("DEBUG: Total samples: %d, Duration: %v, Overlap: %.2f seconds\n",
+			fileInfo.TotalSamples, fileInfo.Duration, settings.BirdNET.Overlap)
+		fmt.Printf("DEBUG: Chunk size: %.2f seconds (%d samples)\n",
+			chunkDuration, chunkSamples)
+		fmt.Printf("DEBUG: Chunk stride: %.2f seconds (%d samples)\n",
+			(chunkDuration - settings.BirdNET.Overlap), stepSamples)
 	}
 
 	// Create buffered channels for processing
-	chunkChan := make(chan audioChunk, 4)
+	chunkChan := make(chan fileChunk, 4)
 	resultChan := make(chan []datastore.Note, 4)
 	errorChan := make(chan error, 1)
 	doneChan := make(chan struct{})
@@ -375,6 +406,7 @@ func processAudioFile(settings *conf.Settings, audioInfo *myaudio.AudioInfo, ctx
 			case <-time.After(5 * time.Second):
 				if settings.Debug {
 					fmt.Printf("DEBUG: Timeout waiting for chunk %d results\n", i)
+					fmt.Printf("DEBUG: Current chunk count: %d/%d\n", atomic.LoadInt64(&chunkCount), totalChunks)
 				}
 				processingErrorMutex.Lock()
 				currentCount := atomic.LoadInt64(&chunkCount)
@@ -391,19 +423,25 @@ func processAudioFile(settings *conf.Settings, audioInfo *myaudio.AudioInfo, ctx
 	// Initialize filePosition before the loop
 	filePosition := time.Time{}
 
-	// Read and send audio chunks with timing information
-	err := myaudio.ReadAudioFileBuffered(settings, func(chunkData []float32) error {
-		chunk := audioChunk{
-			Data:         chunkData,
+	// Create a processor function to handle chunks from the file.ProcessAudioFile method
+	processor := func(chunk file.Chunk) error {
+		if settings.Debug && atomic.LoadInt64(&chunkCount) == 1 {
+			fmt.Printf("DEBUG: First chunk contains %d float32 samples\n", len(chunk.Data))
+		}
+
+		// Convert from file.Chunk to our internal fileChunk type
+		internalChunk := fileChunk{
+			Data:         chunk.Data,
 			FilePosition: filePosition,
 		}
+
+		// Update position for next chunk - overlap is in seconds
+		filePosition = filePosition.Add(time.Duration((3.0 - settings.BirdNET.Overlap) * float64(time.Second)))
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case chunkChan <- chunk:
-			// Update predStart for next chunk
-			filePosition = filePosition.Add(time.Duration((3.0 - bn.Settings.BirdNET.Overlap) * float64(time.Second)))
+		case chunkChan <- internalChunk:
 			return nil
 		case <-doneChan:
 			processingErrorMutex.Lock()
@@ -412,11 +450,15 @@ func processAudioFile(settings *conf.Settings, audioInfo *myaudio.AudioInfo, ctx
 			if err != nil {
 				return err
 			}
-			return ctx.Err() // Return context error if no processing error
+			return ctx.Err()
 		case <-time.After(5 * time.Second):
 			return fmt.Errorf("timeout sending chunk to processing")
 		}
-	})
+	}
+
+	// Process the audio file using the new file package
+	chunkDuration := 3.0 // 3 seconds is the default chunk duration for BirdNET
+	err := fileManager.ProcessAudioFile(ctx, settings.Input.Path, chunkDuration, settings.BirdNET.Overlap, processor)
 
 	if settings.Debug {
 		fmt.Println("DEBUG: Finished reading audio file")
