@@ -14,6 +14,8 @@ The audio system is divided into several subpackages:
 - Defines common interfaces, types, and platform-specific utilities
 - Provides cross-platform abstractions for audio processing
 - Contains platform detection for OS-specific optimizations
+- Implements direct integrations for FFmpeg streaming functionality via `streaming.go`
+- Offers simple factory functions for creating and connecting audio components
 
 ### Capture (`internal/audio/capture`)
 - Handles audio device interaction through the miniaudio/malgo library
@@ -63,6 +65,22 @@ The audio system is divided into several subpackages:
 
 ## Key Components
 
+### Streaming Components
+The audio package provides direct implementations of streaming interfaces:
+
+- **FFmpegStreamManager**: Implements the StreamManager interface using the ffmpegstream package
+  - Handles stream creation, management, and callbacks
+  - Provides methods for starting/stopping streams and monitoring activity
+  - Integrates with FFmpeg process monitoring automatically
+
+- **FFmpegMonitor**: Implements the FFmpegMonitorInterface using the ffmpeg package
+  - Monitors and manages FFmpeg processes
+  - Prevents orphaned processes that could consume resources
+
+- **CreateAudioComponents**: Factory function that creates and initializes both components at once
+  - Returns ready-to-use streaming and monitoring components
+  - Simplifies application setup with a single function call
+
 ### Interfaces
 The package defines several key interfaces that form the backbone of the audio system:
 
@@ -73,6 +91,7 @@ The package defines several key interfaces that form the backbone of the audio s
 - **Processor**: Interface for processing audio data
 - **ModelManager**: Interface for managing BirdNET model instances
 - **StreamManager**: Interface for managing media streams with callbacks for data and level information
+- **FFmpegMonitorInterface**: Interface for FFmpeg process monitoring
 - **Source**: Interface for audio stream sources with lifecycle management methods
 - **ProcessTracker**: Interface for tracking FFmpeg processes
 - **DataCallback**: Function type for receiving audio data from streams
@@ -141,7 +160,64 @@ For detailed usage examples of specific components, please refer to the respecti
 - [Stream Package Documentation](stream/README.md) - For stream source management
 - [FFmpegStream Package Documentation](ffmpegstream/README.md) - For integrated FFmpeg streaming
 
-### Quick Start with FFmpegStream
+### Quick Start with Integrated Streaming Components
+
+```go
+// Get FFmpeg executable path
+ffmpegPath := "/usr/bin/ffmpeg" // or find dynamically
+
+// Create audio components with a single function call
+streamManager, ffmpegMonitor := audio.CreateAudioComponents(ffmpegPath)
+
+// Set callbacks for audio data and levels
+streamManager.SetCallbacks(
+    // Process audio data
+    func(sourceID, sourceName string, data []byte) {
+        // Process audio data (e.g., send to buffer or analyzer)
+        fmt.Printf("Received %d bytes from %s (%s)\n", len(data), sourceName, sourceID)
+    },
+    // Handle audio levels
+    func(level audio.AudioLevelData) {
+        // Update UI with audio levels
+        fmt.Printf("Audio level: %d%% for %s\n", level.Level, level.Source)
+        if level.Clipping {
+            fmt.Println("Warning: Audio clipping detected!")
+        }
+    },
+    // Restart notification
+    func() {
+        fmt.Println("Stream restart detected")
+    },
+)
+
+// Start the stream manager
+if err := streamManager.Start(); err != nil {
+    log.Fatal("Failed to start stream manager:", err)
+}
+
+// Add an RTSP stream
+if err := streamManager.StartStream("rtsp://example.com/stream1", "tcp"); err != nil {
+    log.Printf("Error starting stream: %v", err)
+}
+
+// Check if a stream is active
+if streamManager.IsStreamActive("rtsp://example.com/stream1") {
+    fmt.Println("Stream is active!")
+}
+
+// List all active streams
+activeStreams := streamManager.ListActiveStreams()
+fmt.Println("Active streams:", activeStreams)
+
+// When finished
+streamManager.StopAllStreams()
+streamManager.Stop()
+ffmpegMonitor.Stop()
+```
+
+### Using Direct FFmpegStream Manager
+
+The audio package also allows you to use the FFmpegStream manager directly:
 
 ```go
 // Create FFmpeg manager with path to FFmpeg executable
@@ -194,6 +270,8 @@ manager.Stop()
 - **Context-Based Cancellation**: Clean shutdown of all operations
 - **Protocol Support**: RTSP, HLS, HTTP streaming, and local file support
 - **Audio Export**: Convert PCM data to various formats (MP3, FLAC, AAC, etc.)
+- **Simple Integration**: Direct implementations of audio interfaces using the stream and FFmpeg packages
+- **Factory Functions**: Easy creation of connected components with sensible defaults
 
 ## Dependencies
 
@@ -201,4 +279,4 @@ manager.Stop()
 - **github.com/smallnest/ringbuffer**: Efficient ring buffer implementation
 - **github.com/tphakala/birdnet-go/internal/birdnet**: BirdNET model integration
 - **github.com/tphakala/birdnet-go/internal/conf**: Application configuration
-- **External dependency**: FFmpeg executable for stream and audio processing 
+- **External dependency**: FFmpeg executable for stream and audio processing

@@ -11,12 +11,12 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
 	"github.com/tphakala/birdnet-go/internal/api/v2"
+	"github.com/tphakala/birdnet-go/internal/audio"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/httpcontroller/handlers"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/security"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
 	"golang.org/x/crypto/acme/autocert"
@@ -33,7 +33,7 @@ type Server struct {
 	BirdImageCache    *imageprovider.BirdImageCache
 	Handlers          *handlers.Handlers
 	SunCalc           *suncalc.SunCalc
-	AudioLevelChan    chan myaudio.AudioLevelData
+	AudioLevelChan    chan audio.AudioLevelData
 	controlChan       chan string
 	notificationChan  chan handlers.Notification
 	Processor         *processor.Processor
@@ -45,7 +45,7 @@ type Server struct {
 }
 
 // New initializes a new HTTP server with given context and datastore.
-func New(settings *conf.Settings, dataStore datastore.Interface, birdImageCache *imageprovider.BirdImageCache, audioLevelChan chan myaudio.AudioLevelData, controlChan chan string, proc *processor.Processor) *Server {
+func New(settings *conf.Settings, dataStore datastore.Interface, birdImageCache *imageprovider.BirdImageCache, audioLevelChan chan audio.AudioLevelData, controlChan chan string, proc *processor.Processor) *Server {
 	configureDefaultSettings(settings)
 
 	s := &Server{

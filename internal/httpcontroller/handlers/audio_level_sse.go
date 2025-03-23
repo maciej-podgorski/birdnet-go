@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/tphakala/birdnet-go/internal/audio"
 	"github.com/tphakala/birdnet-go/internal/conf"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 // activeSSEConnections tracks active SSE connections per client IP
@@ -28,8 +28,8 @@ func initializeSSEHeaders(c echo.Context) {
 }
 
 // initializeLevelsData creates and initializes the maps needed for tracking audio levels
-func (h *Handlers) initializeLevelsData(isAuthenticated bool) (levels map[string]myaudio.AudioLevelData, lastUpdate, lastNonZero map[string]time.Time) {
-	levels = make(map[string]myaudio.AudioLevelData)
+func (h *Handlers) initializeLevelsData(isAuthenticated bool) (levels map[string]audio.AudioLevelData, lastUpdate, lastNonZero map[string]time.Time) {
+	levels = make(map[string]audio.AudioLevelData)
 	lastUpdate = make(map[string]time.Time)
 	lastNonZero = make(map[string]time.Time)
 
@@ -39,7 +39,7 @@ func (h *Handlers) initializeLevelsData(isAuthenticated bool) (levels map[string
 		if !isAuthenticated {
 			sourceName = "audio-source-1"
 		}
-		levels["malgo"] = myaudio.AudioLevelData{
+		levels["malgo"] = audio.AudioLevelData{
 			Level:  0,
 			Name:   sourceName,
 			Source: "malgo",
@@ -57,7 +57,7 @@ func (h *Handlers) initializeLevelsData(isAuthenticated bool) (levels map[string
 		} else {
 			displayName = fmt.Sprintf("camera-%d", i+1)
 		}
-		levels[url] = myaudio.AudioLevelData{
+		levels[url] = audio.AudioLevelData{
 			Level:  0,
 			Name:   displayName,
 			Source: url,
@@ -86,7 +86,7 @@ func isSourceInactive(source string, now time.Time, lastUpdateTime, lastNonZeroT
 }
 
 // updateAudioLevels processes new audio data and updates the levels map
-func (h *Handlers) updateAudioLevels(audioData myaudio.AudioLevelData, levels map[string]myaudio.AudioLevelData,
+func (h *Handlers) updateAudioLevels(audioData audio.AudioLevelData, levels map[string]audio.AudioLevelData,
 	lastUpdateTime, lastNonZeroTime map[string]time.Time, isAuthenticated bool, inactivityThreshold time.Duration) {
 
 	now := time.Now()
@@ -126,7 +126,7 @@ func (h *Handlers) updateAudioLevels(audioData myaudio.AudioLevelData, levels ma
 }
 
 // checkSourceActivity checks all sources for inactivity and updates their levels if needed
-func checkSourceActivity(levels map[string]myaudio.AudioLevelData, lastUpdateTime, lastNonZeroTime map[string]time.Time,
+func checkSourceActivity(levels map[string]audio.AudioLevelData, lastUpdateTime, lastNonZeroTime map[string]time.Time,
 	inactivityThreshold time.Duration) bool {
 
 	now := time.Now()
@@ -248,10 +248,10 @@ func (h *Handlers) AudioLevelSSE(c echo.Context) error {
 }
 
 // sendLevelsUpdate sends the current levels data to the client
-func sendLevelsUpdate(c echo.Context, levels map[string]myaudio.AudioLevelData) error {
+func sendLevelsUpdate(c echo.Context, levels map[string]audio.AudioLevelData) error {
 	message := struct {
-		Type   string                            `json:"type"`
-		Levels map[string]myaudio.AudioLevelData `json:"levels"`
+		Type   string                          `json:"type"`
+		Levels map[string]audio.AudioLevelData `json:"levels"`
 	}{
 		Type:   "audio-level",
 		Levels: levels,

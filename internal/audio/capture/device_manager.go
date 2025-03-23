@@ -180,8 +180,13 @@ func (m *DeviceManager) StartCapture(deviceID string, sampleRate, channels uint3
 		return fmt.Errorf("device not found: %w", err)
 	}
 
-	// Generate a source ID for this device
-	sourceID := fmt.Sprintf("device:%s", deviceID)
+	// Generate a unique source ID for this device
+	// Format: device:{uniqueID}:{name}
+	// This ensures we have both a unique identifier and a human-readable name
+	sourceID := fmt.Sprintf("device:%s:%s", deviceInfo.ID, deviceInfo.Name)
+
+	// Log the device mapping for debugging
+	log.Printf("🎤 Mapping device '%s' to unique source ID: '%s'", deviceID, sourceID)
 
 	// Store the callback in the map (for later reference)
 	m.callbackMap[deviceID] = func(data []byte, frameCount uint32) {
@@ -369,7 +374,7 @@ func (m *DeviceManager) StopCapture(deviceID string) error {
 	state.isActive = false
 	state.device = nil
 
-	log.Printf("🛑 Stopped listening on source: %s (%s)", state.info.Name, deviceID)
+	log.Printf("🛑 Stopped listening on source: %s (ID: %s)", state.info.Name, sourceID)
 
 	// Call the stop callback
 	if m.stopCallback != nil {

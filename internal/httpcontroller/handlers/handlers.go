@@ -10,10 +10,10 @@ import (
 	"sync"
 
 	"github.com/labstack/echo/v4"
+	"github.com/tphakala/birdnet-go/internal/audio"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/security"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
 )
@@ -27,9 +27,9 @@ type Handlers struct {
 	Settings          *conf.Settings
 	DashboardSettings *conf.Dashboard
 	BirdImageCache    *imageprovider.BirdImageCache
-	SSE               *SSEHandler                 // Server Side Events handler
-	SunCalc           *suncalc.SunCalc            // SunCalc instance for calculating sun event times
-	AudioLevelChan    chan myaudio.AudioLevelData // Channel for audio level updates
+	SSE               *SSEHandler               // Server Side Events handler
+	SunCalc           *suncalc.SunCalc          // SunCalc instance for calculating sun event times
+	AudioLevelChan    chan audio.AudioLevelData // Channel for audio level updates
 	OAuth2Server      *security.OAuth2Server
 	controlChan       chan string
 	notificationChan  chan Notification
@@ -77,7 +77,7 @@ func (bh *baseHandler) logInfo(message string) {
 }
 
 // New creates a new Handlers instance with the given dependencies.
-func New(ds datastore.Interface, settings *conf.Settings, dashboardSettings *conf.Dashboard, birdImageCache *imageprovider.BirdImageCache, logger *log.Logger, sunCalc *suncalc.SunCalc, audioLevelChan chan myaudio.AudioLevelData, oauth2Server *security.OAuth2Server, controlChan chan string, notificationChan chan Notification, server interface{ IsAccessAllowed(c echo.Context) bool }) *Handlers {
+func New(ds datastore.Interface, settings *conf.Settings, dashboardSettings *conf.Dashboard, birdImageCache *imageprovider.BirdImageCache, logger *log.Logger, sunCalc *suncalc.SunCalc, audioLevelChan chan audio.AudioLevelData, oauth2Server *security.OAuth2Server, controlChan chan string, notificationChan chan Notification, server interface{ IsAccessAllowed(c echo.Context) bool }) *Handlers {
 	if logger == nil {
 		logger = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
 	}

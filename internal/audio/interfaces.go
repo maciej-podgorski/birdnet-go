@@ -115,6 +115,9 @@ type StreamManager interface {
 
 	// ListActiveStreams returns a list of active streams.
 	ListActiveStreams() []string
+
+	// GetActiveStreams returns a list of active stream IDs.
+	GetActiveStreams() []string
 }
 
 // DeviceManager manages audio capture devices.

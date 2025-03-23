@@ -11,6 +11,14 @@ import (
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
+// LastAnalysisTime tracks when each source was last analyzed
+var LastAnalysisTime = struct {
+	sync.RWMutex
+	times map[string]time.Time
+}{
+	times: make(map[string]time.Time),
+}
+
 // Manager handles the management of BirdNET model instances.
 type Manager struct {
 	// Default BirdNET instance for fallback
@@ -178,8 +186,75 @@ func (m *Manager) Cleanup() {
 	m.modelInstances = make(map[string]*birdnet.BirdNET)
 }
 
+// shouldAnalyze determines if it's time to analyze data from this source
+// based on the last analysis time and the overlap settings
+func (m *Manager) shouldAnalyze(sourceID string) bool {
+	// BirdNET analysis is based on 3-second segments
+	bufferDuration := 3 * time.Second
+
+	// Get the overlap from settings (default to 0 if not set)
+	var overlapDuration time.Duration
+	if m.settings != nil {
+		overlapDuration = time.Duration(m.settings.BirdNET.Overlap * float64(time.Second))
+	}
+
+	// Calculate the minimum time between analyses
+	// With 3s segments and 1s overlap, we should analyze every 2s
+	effectiveInterval := bufferDuration - overlapDuration
+	if effectiveInterval <= 0 {
+		// Default to 1 second if calculation is invalid
+		effectiveInterval = 1 * time.Second
+	}
+
+	// Check if enough time has passed since the last analysis
+	LastAnalysisTime.RLock()
+	lastTime, exists := LastAnalysisTime.times[sourceID]
+	LastAnalysisTime.RUnlock()
+
+	// If this is the first analysis or enough time has passed
+	if !exists || time.Since(lastTime) >= effectiveInterval {
+		// Update the last analysis time
+		LastAnalysisTime.Lock()
+		LastAnalysisTime.times[sourceID] = time.Now()
+		LastAnalysisTime.Unlock()
+		return true
+	}
+
+	return false
+}
+
+// hasCompleteData checks if the provided data buffer has enough samples for a complete analysis
+func (m *Manager) hasCompleteData(data []byte) bool {
+	// Calculate required buffer size for a 3-second segment at the configured sample rate
+	// BirdNET requires 3 seconds of audio data to analyze
+	expectedSamples := 3 * conf.SampleRate // e.g., 3 seconds * 48000 Hz = 144000 samples
+	bytesPerSample := conf.BitDepth / 8    // e.g., 16 bits = 2 bytes per sample
+	expectedBytes := expectedSamples * bytesPerSample * conf.NumChannels
+
+	// Check if we have enough data
+	if len(data) < expectedBytes {
+		return false
+	}
+
+	return true
+}
+
 // Analyze sends audio data to the appropriate BirdNET instance for analysis.
 func (m *Manager) Analyze(sourceID string, data []byte, startTime int64) error {
+	// Check if we should analyze this sample based on timing
+	if !m.shouldAnalyze(sourceID) {
+		return nil // Skip this sample, not time to analyze yet
+	}
+
+	// Check if we have enough data for a complete analysis
+	if !m.hasCompleteData(data) {
+		if m.settings.BirdNET.Debug {
+			log.Printf("⚠️ [DEBUG] Skipping analysis for source %s: incomplete data (%d bytes)",
+				sourceID, len(data))
+		}
+		return nil // Skip this sample, not enough data
+	}
+
 	// Get the BirdNET instance for this source
 	instance := m.GetModelForSource(sourceID)
 	if instance == nil {
@@ -196,6 +271,26 @@ func (m *Manager) Analyze(sourceID string, data []byte, startTime int64) error {
 	results, err := instance.Predict(sampleData)
 	if err != nil {
 		return fmt.Errorf("error predicting species: %w", err)
+	}
+
+	// Debug output when enabled
+	if m.settings.BirdNET.Debug {
+		timestamp := time.Unix(startTime, 0).Format("15:04:05")
+		log.Printf("🔍 [DEBUG] BirdNET Prediction Results at %s for source %s:", timestamp, sourceID)
+		log.Printf("  Data size: %d bytes (expected min: %d bytes)",
+			len(data), 3*conf.SampleRate*(conf.BitDepth/8)*conf.NumChannels)
+		for i, result := range results {
+			if i < 10 { // Print top 10 results
+				log.Printf("  %d. %s: %.6f", i+1, result.Species, result.Confidence)
+			}
+		}
+
+		// Log the timing information to help debug prediction frequency
+		bufferDuration := 3 * time.Second
+		overlapDuration := time.Duration(m.settings.BirdNET.Overlap * float64(time.Second))
+		effectiveInterval := bufferDuration - overlapDuration
+		log.Printf("🔍 [DEBUG] Analysis timing: overlap=%v, effective interval=%v",
+			overlapDuration, effectiveInterval)
 	}
 
 	// Send results to the BirdNET results queue

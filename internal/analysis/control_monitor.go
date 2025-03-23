@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
+	"github.com/tphakala/birdnet-go/internal/audio"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/httpcontroller/handlers"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 // ControlMonitor handles control signals for realtime analysis mode
@@ -23,25 +23,31 @@ type ControlMonitor struct {
 	quitChan         chan struct{}
 	restartChan      chan struct{}
 	notificationChan chan handlers.Notification
-	bufferManager    *BufferManager
 	proc             *processor.Processor
-	audioLevelChan   chan myaudio.AudioLevelData
+	audioLevelChan   chan audio.AudioLevelData
 	bn               *birdnet.BirdNET
+	streamManager    audio.StreamManager
+	ffmpegMonitor    audio.FFmpegMonitorInterface
 }
 
 // NewControlMonitor creates a new ControlMonitor instance
-func NewControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, restartChan chan struct{}, notificationChan chan handlers.Notification, bufferManager *BufferManager, proc *processor.Processor) *ControlMonitor {
+func NewControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, restartChan chan struct{}, notificationChan chan handlers.Notification, proc *processor.Processor) *ControlMonitor {
 	return &ControlMonitor{
 		wg:               wg,
 		controlChan:      controlChan,
 		quitChan:         quitChan,
 		restartChan:      restartChan,
 		notificationChan: notificationChan,
-		bufferManager:    bufferManager,
 		proc:             proc,
-		audioLevelChan:   make(chan myaudio.AudioLevelData),
+		audioLevelChan:   make(chan audio.AudioLevelData),
 		bn:               proc.Bn,
 	}
+}
+
+// SetStreamComponents sets the audio streaming components for this monitor
+func (cm *ControlMonitor) SetStreamComponents(streamManager audio.StreamManager, ffmpegMonitor audio.FFmpegMonitorInterface) {
+	cm.streamManager = streamManager
+	cm.ffmpegMonitor = ffmpegMonitor
 }
 
 // Start begins monitoring control signals
@@ -157,26 +163,91 @@ func (cm *ControlMonitor) handleReconfigureMQTT() {
 
 // handleReconfigureRTSP reconfigures RTSP sources
 func (cm *ControlMonitor) handleReconfigureRTSP() {
-	log.Printf("\033[32m🔄 Reconfiguring RTSP sources...\033[0m")
+	log.Printf("\033[32m🔄 Reconfiguring audio sources...\033[0m")
 	settings := conf.Setting()
 
-	// Prepare the list of active sources
-	var sources []string
-	if len(settings.Realtime.RTSP.URLs) > 0 {
-		sources = append(sources, settings.Realtime.RTSP.URLs...)
+	// Check if we have the new StreamManager
+	if cm.streamManager != nil {
+		// Get list of current active streams before stopping them
+		activeStreams := cm.streamManager.GetActiveStreams()
+
+		// Stop all existing streams
+		cm.streamManager.StopAllStreams()
+
+		// Track which sources will remain active
+		newActiveSources := make(map[string]bool)
+
+		// Add RTSP streams if configured
+		if len(settings.Realtime.RTSP.URLs) > 0 {
+			for _, url := range settings.Realtime.RTSP.URLs {
+				if url != "" {
+					transport := settings.Realtime.RTSP.Transport
+					if transport == "" {
+						transport = "tcp" // Default to TCP if not specified
+					}
+
+					// Mark this source as active in the new configuration
+					sourceID := url
+					newActiveSources[sourceID] = true
+
+					if err := cm.streamManager.StartStream(url, transport); err != nil {
+						log.Printf("\033[31m❌ Error starting stream %s: %v\033[0m", url, err)
+					} else {
+						log.Printf("\033[32m✅ Started stream: %s\033[0m", url)
+					}
+				}
+			}
+		}
+
+		// Cleanup buffers for sources that were removed
+		if bufferManager != nil {
+			for _, sourceID := range activeStreams {
+				// Skip if source is still active in new configuration
+				if newActiveSources[sourceID] {
+					continue
+				}
+
+				// Source was removed, deallocate its buffers
+				log.Printf("\033[33m🧹 Removing buffers for inactive source: %s\033[0m", sourceID)
+
+				// Remove analysis buffer if it exists
+				if bufferManager.HasAnalysisBuffer(sourceID) {
+					if err := bufferManager.RemoveAnalysisBuffer(sourceID); err != nil {
+						log.Printf("\033[31m❌ Error removing analysis buffer for %s: %v\033[0m", sourceID, err)
+					} else {
+						log.Printf("\033[32m✅ Removed analysis buffer for source: %s\033[0m", sourceID)
+					}
+				}
+
+				// Remove capture buffer if it exists
+				if bufferManager.HasCaptureBuffer(sourceID) {
+					if err := bufferManager.RemoveCaptureBuffer(sourceID); err != nil {
+						log.Printf("\033[31m❌ Error removing capture buffer for %s: %v\033[0m", sourceID, err)
+					} else {
+						log.Printf("\033[32m✅ Removed capture buffer for source: %s\033[0m", sourceID)
+					}
+				}
+			}
+		}
+
+		log.Printf("\033[32m✅ Audio sources reconfigured successfully\033[0m")
+		cm.notifySuccess("Audio sources reconfigured successfully")
+		return
 	}
-	if settings.Realtime.Audio.Source != "" {
-		sources = append(sources, "malgo")
+
+	// If StreamManager is not available, use restart channel as fallback
+	log.Printf("\033[33m⚠️ StreamManager not available, using restart signal\033[0m")
+
+	// Signal restart to any listening components
+	select {
+	case cm.restartChan <- struct{}{}:
+		log.Printf("\033[32m✅ Restart signal sent\033[0m")
+	default:
+		log.Printf("\033[33m⚠️ No listeners for restart signal\033[0m")
 	}
 
-	// Update the analysis buffer monitors
-	cm.bufferManager.UpdateMonitors(sources)
-
-	// Reconfigure RTSP streams
-	myaudio.ReconfigureRTSPStreams(settings, cm.wg, cm.quitChan, cm.restartChan, cm.audioLevelChan)
-
-	log.Printf("\033[32m✅ RTSP sources reconfigured successfully\033[0m")
-	cm.notifySuccess("Audio capture reconfigured successfully")
+	log.Printf("\033[32m✅ Audio sources reconfiguration requested\033[0m")
+	cm.notifySuccess("Audio sources reconfiguration requested")
 }
 
 // handleReconfigureBirdWeather reconfigures the BirdWeather integration
@@ -193,21 +264,22 @@ func (cm *ControlMonitor) handleReconfigureBirdWeather() {
 	// First, safely disconnect any existing client
 	cm.proc.DisconnectBwClient()
 
-	// Create new BirdWeather client with updated settings
+	// If BirdWeather is enabled, initialize and connect
 	if settings.Realtime.Birdweather.Enabled {
-		bwClient, err := birdweather.New(settings)
+		var err error
+		newClient, err := birdweather.New(settings)
 		if err != nil {
 			log.Printf("\033[31m❌ Error creating BirdWeather client: %v\033[0m", err)
 			cm.notifyError("Failed to create BirdWeather client", err)
 			return
 		}
 
-		// Update the processor's BirdWeather client using the thread-safe setter
-		cm.proc.SetBwClient(bwClient)
+		// Safely set the new client
+		cm.proc.SetBwClient(newClient)
+
 		log.Printf("\033[32m✅ BirdWeather integration configured successfully\033[0m")
 		cm.notifySuccess("BirdWeather integration configured successfully")
 	} else {
-		// If BirdWeather is disabled, client is already set to nil by DisconnectBwClient
 		log.Printf("\033[32m✅ BirdWeather integration disabled\033[0m")
 		cm.notifySuccess("BirdWeather integration disabled")
 	}
@@ -215,16 +287,15 @@ func (cm *ControlMonitor) handleReconfigureBirdWeather() {
 
 // notifySuccess sends a success notification
 func (cm *ControlMonitor) notifySuccess(message string) {
-	cm.notificationChan <- handlers.Notification{
-		Message: message,
-		Type:    "success",
+	if cm.notificationChan != nil {
+		cm.notificationChan <- handlers.Notification{Type: "success", Message: message}
 	}
 }
 
 // notifyError sends an error notification
 func (cm *ControlMonitor) notifyError(message string, err error) {
-	cm.notificationChan <- handlers.Notification{
-		Message: fmt.Sprintf("%s: %v", message, err),
-		Type:    "error",
+	if cm.notificationChan != nil {
+		errorMsg := fmt.Sprintf("%s: %v", message, err)
+		cm.notificationChan <- handlers.Notification{Type: "error", Message: errorMsg}
 	}
 }

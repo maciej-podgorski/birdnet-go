@@ -16,6 +16,27 @@ This package is part of the larger [audio system](../README.md) which provides c
   - Handles model configuration and initialization
   - Implements proper resource cleanup during shutdown
   - Ensures thread safety with read/write mutex locks
+  - Outputs detailed prediction results when debug mode is enabled
+  - Controls analysis timing based on configured overlap settings
+  - Verifies data completeness before processing analysis
+
+### Timing Control
+
+- **Prediction Frequency Control**: Ensures analysis timing follows BirdNET's sliding window approach
+  - Manages 3-second segments with configurable overlap
+  - For example, with 1-second overlap, predictions run every 2 seconds
+  - Provides consistent analysis timing across all audio sources
+  - Prevents CPU overload from excessive predictions
+  - Respects the configured `settings.BirdNET.Overlap` value
+
+### Data Validation
+
+- **Completeness Check**: Ensures analysis only runs on complete audio segments
+  - Validates that incoming audio buffers contain enough samples for a full 3-second segment
+  - Calculates expected buffer size based on sample rate, bit depth, and channel count
+  - Skips analysis for incomplete data to prevent inaccurate predictions
+  - Logs detailed information about skipped buffers when debug mode is enabled
+  - Prevents analyzing partial segments that would produce unreliable results
 
 ### Utilities
 
@@ -29,6 +50,28 @@ All components implement proper mutex locking to ensure thread-safe operations i
 - Model instance access is protected by read/write mutexes
 - Source-to-model mapping is thread-safe
 - Analysis operations are synchronized
+- Timing control uses thread-safe access to last analysis times
+
+## Debug Mode
+
+When `settings.BirdNET.Debug` is enabled in configuration, the model manager will:
+
+- Print detailed information about each prediction process
+- Display the top 10 species results for each prediction with confidence scores
+- Include source ID and timestamp in debug output
+- Show analysis timing details including overlap and effective interval
+- Report buffer sizes and indicate when buffers are skipped due to incomplete data
+- Help with troubleshooting false negatives and positives
+
+To enable debug mode, set `debug: true` under the `birdnet` section in your config.yaml:
+
+```yaml
+birdnet:
+  debug: true
+  sensitivity: 1.0
+  threshold: 0.8
+  # other settings...
+```
 
 ## Usage Examples
 
