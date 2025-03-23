@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
+	"github.com/tphakala/birdnet-go/internal/audio/buffer"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -37,6 +38,7 @@ type Processor struct {
 	LastDogDetection    map[string]time.Time // keep track of dog barks per audio source
 	LastHumanDetection  map[string]time.Time // keep track of human vocal per audio source
 	Metrics             *telemetry.Metrics
+	BufferManager       buffer.BufferManagerInterface // Add BufferManager field
 	DynamicThresholds   map[string]*DynamicThreshold
 	thresholdsMutex     sync.RWMutex // Mutex to protect access to DynamicThresholds
 	pendingDetections   map[string]PendingDetection
@@ -81,7 +83,7 @@ type PendingDetection struct {
 var mutex sync.Mutex
 
 // func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, audioBuffers map[string]*myaudio.AudioBuffer, metrics *telemetry.Metrics) *Processor {
-func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, metrics *telemetry.Metrics, birdImageCache *imageprovider.BirdImageCache) *Processor {
+func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, metrics *telemetry.Metrics, birdImageCache *imageprovider.BirdImageCache, bufferManager buffer.BufferManagerInterface) *Processor {
 	p := &Processor{
 		Settings:            settings,
 		Ds:                  ds,
@@ -89,6 +91,7 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 		BirdImageCache:      birdImageCache,
 		EventTracker:        NewEventTracker(time.Duration(settings.Realtime.Interval) * time.Second),
 		Metrics:             metrics,
+		BufferManager:       bufferManager, // Initialize BufferManager
 		LastDogDetection:    make(map[string]time.Time),
 		LastHumanDetection:  make(map[string]time.Time),
 		DynamicThresholds:   make(map[string]*DynamicThreshold),
@@ -508,11 +511,13 @@ func (p *Processor) getDefaultActions(detection *Detections) []Action {
 
 	if p.Settings.Output.SQLite.Enabled || p.Settings.Output.MySQL.Enabled {
 		actions = append(actions, &DatabaseAction{
-			Settings:     p.Settings,
-			EventTracker: p.EventTracker,
-			Note:         detection.Note,
-			Results:      detection.Results,
-			Ds:           p.Ds})
+			Settings:      p.Settings,
+			EventTracker:  p.EventTracker,
+			Note:          detection.Note,
+			Results:       detection.Results,
+			Ds:            p.Ds,
+			BufferManager: p.BufferManager,
+		})
 	}
 
 	// Add BirdWeatherAction if enabled and client is initialized

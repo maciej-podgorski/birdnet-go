@@ -145,7 +145,7 @@ func RealtimeAnalysis(settings *conf.Settings, notificationChan chan handlers.No
 	}
 
 	// Initialize processor
-	proc := processor.New(settings, dataStore, bn, metrics, birdImageCache)
+	proc := processor.New(settings, dataStore, bn, metrics, birdImageCache, bufferManager)
 
 	// Initialize and start the HTTP server
 	httpServer := httpcontroller.New(settings, dataStore, birdImageCache, audioLevelChan, controlChan, proc)
@@ -265,7 +265,7 @@ func processAudioData(sourceID string, data []byte, startTime time.Time) {
 			// Continue processing even if capture buffer creation fails
 			// We'll still be able to analyze audio, just not save clips
 		} else {
-			log.Printf("✅ Created capture buffer for source: %s (duration: %ds)", sourceID, captureDuration)
+			log.Printf("✅ Created capture buffer for source: '%s' (duration: %ds)", sourceID, captureDuration)
 		}
 	}
 

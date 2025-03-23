@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
+	"github.com/tphakala/birdnet-go/internal/audio/buffer"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -38,13 +39,14 @@ type LogAction struct {
 }
 
 type DatabaseAction struct {
-	Settings     *conf.Settings
-	Ds           datastore.Interface
-	Note         datastore.Note
-	Results      []datastore.Results
-	EventTracker *EventTracker
-	Description  string
-	mu           sync.Mutex // Protect concurrent access to Note and Results
+	Settings      *conf.Settings
+	Ds            datastore.Interface
+	Note          datastore.Note
+	Results       []datastore.Results
+	EventTracker  *EventTracker
+	BufferManager buffer.BufferManagerInterface
+	Description   string
+	mu            sync.Mutex // Protect concurrent access to Note and Results
 }
 
 type SaveAudioAction struct {
@@ -175,8 +177,8 @@ func (a *DatabaseAction) Execute(data interface{}) error {
 
 	// Save audio clip to file if enabled
 	if a.Settings.Realtime.Audio.Export.Enabled {
-		// export audio clip from capture buffer
-		pcmData, err := myaudio.ReadSegmentFromCaptureBuffer(a.Note.Source, a.Note.BeginTime, 15)
+		// export audio clip from capture buffer using the BufferManager
+		pcmData, err := a.BufferManager.ReadSegmentFromCaptureBuffer(a.Note.Source, a.Note.BeginTime, 15)
 		if err != nil {
 			log.Printf("❌ Failed to read audio segment from buffer: %v", err)
 			return err

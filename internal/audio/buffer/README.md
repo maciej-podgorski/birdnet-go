@@ -157,6 +157,308 @@ hasCapture := manager.HasCaptureBuffer(sourceID)
 manager.CleanupAllBuffers()
 ```
 
+## Migrating from Legacy myaudio Package
+
+The `buffer` package replaces the legacy `myaudio` package for audio buffer management with several key improvements:
+
+### Key Improvements
+
+1. **Interface-Based Design**: Buffer operations are defined by interfaces like `BufferManagerInterface`, enabling dependency injection and better testability.
+2. **Proper Dependency Management**: All dependencies are explicitly passed to buffer components rather than using global state.
+3. **Thread Safety**: Comprehensive mutex protection with proper lock granularity for optimal concurrency.
+4. **Error Handling**: Consistent error patterns with proper context and wrapping.
+5. **Resource Management**: Explicit lifecycle methods for buffer allocation and cleanup.
+6. **Standardized Source ID Handling**: Consistent handling of source IDs with or without prefixes.
+7. **Simplified API**: More intuitive API with consistent parameter ordering and naming.
+8. **Improved Testability**: Mock implementations available for all interfaces to facilitate unit testing.
+
+### Migration Steps
+
+To migrate from the legacy myaudio package to the buffer package:
+
+1. **Initialize Buffer Components**:
+   ```go
+   // Create a buffer factory and manager
+   factory := buffer.NewBufferFactory()
+   bufferManager := factory.CreateBufferManager()
+   ```
+
+2. **Update Function Calls**:
+   
+   *Old approach (myaudio):*
+   ```go
+   // Initialize a buffer
+   myaudio.AllocateCaptureBuffer(60, 48000, 2, "deviceID")
+   
+   // Write to buffer
+   myaudio.WriteToCaptureBuffer("deviceID", audioData)
+   
+   // Read from buffer
+   pcmData, err := myaudio.ReadSegmentFromCaptureBuffer("deviceID", startTime, 15)
+   
+   // Remove buffer when done
+   myaudio.RemoveCaptureBuffer("deviceID")
+   ```
+
+   *New approach (buffer):*
+   ```go
+   // Initialize a buffer
+   bufferManager.AllocateCaptureBuffer(60, 48000, 2, "deviceID")
+   
+   // Write to buffer
+   bufferManager.WriteToCaptureBuffer("deviceID", audioData)
+   
+   // Read from buffer
+   pcmData, err := bufferManager.ReadSegmentFromCaptureBuffer("deviceID", startTime, 15)
+   
+   // Remove buffer when done
+   bufferManager.RemoveCaptureBuffer("deviceID")
+   ```
+
+3. **Add Buffer Manager to Structs**:
+   ```go
+   type MyComponent struct {
+       // ... other fields
+       BufferManager buffer.BufferManagerInterface
+   }
+   
+   func (c *MyComponent) Process() {
+       // Use c.BufferManager instead of global myaudio functions
+   }
+   ```
+
+4. **Dependency Injection**:
+   ```go
+   // Pass buffer manager to components that need it
+   proc := processor.New(settings, dataStore, bn, metrics, imageCache, bufferManager)
+   ```
+
+5. **Handle Source IDs Consistently**:
+   The buffer manager standardizes source IDs internally, so you don't need to worry about prefixes like "device:" anymore:
+   ```go
+   // Both will work with the new buffer manager
+   bufferManager.ReadSegmentFromCaptureBuffer("deviceID", startTime, 15)
+   bufferManager.ReadSegmentFromCaptureBuffer("device:deviceID", startTime, 15)
+   ```
+
+6. **Update Integration Points**:
+   
+   *For analysis processing:*
+   ```go
+   // Old approach using global functions
+   func processAudio(sourceID string) {
+       // Read data from global analysis buffer
+       analysisData, err := myaudio.ReadFromAnalysisBuffer(sourceID, nil)
+       if err != nil || analysisData == nil {
+           return
+       }
+       
+       // Process the data
+       analyzeAudio(analysisData)
+   }
+   
+   // New approach using BufferManager
+   func (p *Processor) processAudio(sourceID string) {
+       // Read data from buffer manager
+       analysisData, err := p.BufferManager.ReadFromAnalysisBuffer(sourceID, nil)
+       if err != nil || analysisData == nil {
+           return
+       }
+       
+       // Process the data
+       p.analyzeAudio(analysisData)
+   }
+   ```
+   
+   *For audio export:*
+   ```go
+   // Old approach using global functions
+   func exportAudio(sourceID string, startTime time.Time) ([]byte, error) {
+       // Read segment from global capture buffer
+       return myaudio.ReadSegmentFromCaptureBuffer(sourceID, startTime, 15)
+   }
+   
+   // New approach using BufferManager
+   func (a *AudioExporter) exportAudio(sourceID string, startTime time.Time) ([]byte, error) {
+       // Read segment from buffer manager
+       return a.BufferManager.ReadSegmentFromCaptureBuffer(sourceID, startTime, 15)
+   }
+   ```
+
+7. **Update Initialization in Main Application**:
+   ```go
+   // Create the buffer manager
+   factory := buffer.NewBufferFactory()
+   bufferManager := factory.CreateBufferManager()
+   
+   // Pass it to all components that need it
+   deviceManager := capture.NewDeviceManager(audioCtx, bufferManager)
+   processor := analysis.NewProcessor(settings, bufferManager)
+   exporter := audio.NewExporter(bufferManager)
+   
+   // Start capturing devices with buffers automatically allocated
+   deviceManager.StartCapture("myDevice", 48000, 1)
+   ```
+
+### Common Migration Patterns
+
+#### Global to Local Transition
+
+**Before:**
+```go
+package mypackage
+
+import (
+    "github.com/tphakala/birdnet-go/internal/myaudio"
+)
+
+func processAudioSegment(sourceID string, startTime time.Time) error {
+    // Using global functions
+    pcmData, err := myaudio.ReadSegmentFromCaptureBuffer(sourceID, startTime, 15)
+    if err != nil {
+        return err
+    }
+    
+    // Process pcmData
+    return nil
+}
+```
+
+**After:**
+```go
+package mypackage
+
+import (
+    "github.com/tphakala/birdnet-go/internal/audio/buffer"
+)
+
+type Processor struct {
+    BufferManager buffer.BufferManagerInterface
+}
+
+func (p *Processor) processAudioSegment(sourceID string, startTime time.Time) error {
+    // Using the injected buffer manager
+    pcmData, err := p.BufferManager.ReadSegmentFromCaptureBuffer(sourceID, startTime, 15)
+    if err != nil {
+        return err
+    }
+    
+    // Process pcmData
+    return nil
+}
+```
+
+#### DatabaseAction Example
+
+A complete example showing the migration of the DatabaseAction component:
+
+**Before:**
+```go
+package processor
+
+import (
+    "time"
+    "log"
+    
+    "github.com/tphakala/birdnet-go/internal/myaudio"
+)
+
+type DatabaseAction struct {
+    Note *Note
+    // other fields
+}
+
+func (a *DatabaseAction) Execute() error {
+    // Read segment using global function
+    pcmData, err := myaudio.ReadSegmentFromCaptureBuffer(a.Note.Source, a.Note.BeginTime, 15)
+    if err != nil {
+        log.Printf("Error reading PCM data: %v", err)
+        return err
+    }
+    
+    // Save audio to database
+    return saveAudio(pcmData)
+}
+```
+
+**After:**
+```go
+package processor
+
+import (
+    "time"
+    "log"
+    
+    "github.com/tphakala/birdnet-go/internal/audio/buffer"
+)
+
+type DatabaseAction struct {
+    Note *Note
+    BufferManager buffer.BufferManagerInterface
+    // other fields
+}
+
+func (a *DatabaseAction) Execute() error {
+    // Read segment using buffer manager
+    pcmData, err := a.BufferManager.ReadSegmentFromCaptureBuffer(a.Note.Source, a.Note.BeginTime, 15)
+    if err != nil {
+        log.Printf("Error reading PCM data: %v", err)
+        return err
+    }
+    
+    // Save audio to database
+    return saveAudio(pcmData)
+}
+```
+
+### Handling Edge Cases
+
+#### Source ID Standardization
+
+Both versions of the source ID (with or without the "device:" prefix) will work with the new buffer manager, as it internally handles standardization:
+
+```go
+// Both of these will find the same buffer
+bufferManager.HasCaptureBuffer("microphone1")
+bufferManager.HasCaptureBuffer("device:microphone1")
+```
+
+#### Thread Safety
+
+The new package properly handles thread safety, so you don't need to add your own locks:
+
+```go
+// This is now safe for concurrent access from multiple goroutines
+go func() {
+    bufferManager.WriteToCaptureBuffer("source1", data1)
+}()
+go func() {
+    bufferManager.ReadSegmentFromCaptureBuffer("source1", time.Now(), 10)
+}()
+```
+
+#### Error Handling
+
+The new package provides more consistent error handling:
+
+```go
+// Example of improved error handling
+segment, err := bufferManager.ReadSegmentFromCaptureBuffer(sourceID, startTime, duration)
+if err != nil {
+    if errors.Is(err, buffer.ErrBufferNotFound) {
+        // Handle missing buffer case
+        log.Printf("No buffer found for source %s", sourceID)
+    } else if errors.Is(err, buffer.ErrSegmentNotAvailable) {
+        // Handle case where segment is outside buffer timeframe
+        log.Printf("Requested segment not available in buffer")
+    } else {
+        // Handle other errors
+        log.Printf("Error reading segment: %v", err)
+    }
+    return err
+}
+```
+
 ## Thread Safety
 
 All buffer implementations use appropriate mutex locks to ensure thread-safe operations:
@@ -195,7 +497,11 @@ The package follows Go error handling best practices:
 ## Dependencies
 
 - **github.com/smallnest/ringbuffer**: Efficient ring buffer implementation used by AnalysisBuffer
-- Standard Go libraries for core functionality (sync, time, errors)
+- **sync**: For mutex and read/write mutex implementations (`sync.Mutex`, `sync.RWMutex`)
+- **time**: For time-related operations (`time.Now()`, `time.Duration`, etc.)
+- **errors**: For error handling and wrapping (`errors.New`, `errors.Is`, etc.)
+- **fmt**: For string formatting and error wrapping (`fmt.Errorf`)
+- **log**: For optional debug logging
 
 ## Implementation Notes
 

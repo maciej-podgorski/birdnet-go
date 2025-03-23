@@ -23,9 +23,12 @@ The audio system is divided into several subpackages:
 - See detailed documentation in the [capture README](capture/README.md)
 
 ### Buffer (`internal/audio/buffer`)
-- Provides buffer management for audio data
+- Provides thread-safe buffer management for audio data
 - Implements both analysis buffers (for real-time processing) and capture buffers (for recording)
-- Handles thread-safe read/write operations for multiple audio sources
+- Handles consistent read/write operations for multiple audio sources
+- Replaces legacy functionality from the myaudio package with a modern interface-based design
+- Facilitates dependency injection for improved testability
+- Features comprehensive error handling and robust resource management
 - See detailed documentation in the [buffer README](buffer/README.md)
 
 ### Model (`internal/audio/model`)
@@ -62,6 +65,47 @@ The audio system is divided into several subpackages:
 - Offers audio export functionality for recording capabilities
 - Provides a simplified, thread-safe API for applications
 - See detailed documentation in the [ffmpegstream README](ffmpegstream/README.md)
+
+## System Architecture
+
+The audio system follows a layered architecture with clear component responsibilities:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                        Application                         │
+└───────────────────────────┬────────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────────┐
+│                     Audio Controller                       │
+│                                                            │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌──────────┐  │
+│  │  Device Manager │   │ Stream Manager  │   │ Processor│  │
+│  └────────┬────────┘   └────────┬────────┘   └────┬─────┘  │
+└───────────┼─────────────────────┼─────────────────┼────────┘
+            │                     │                 │
+┌───────────▼─────────────────────▼─────────────────▼────────┐
+│                       Buffer Manager                       │
+│                                                            │
+│  ┌─────────────────┐   ┌─────────────────┐                 │
+│  │ Analysis Buffers│   │ Capture Buffers │                 │
+│  └─────────────────┘   └─────────────────┘                 │
+└────────────────────────────────────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────────┐
+│                       Model Manager                        │
+│                                                            │
+│  ┌─────────────────┐   ┌─────────────────┐                 │
+│  │  BirdNET Model  │   │  Custom Models  │                 │
+│  └─────────────────┘   └─────────────────┘                 │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Audio Flow
+
+1. **Audio Sources** → Raw audio from devices (via Capture) or streams (via FFmpegStream)
+2. **Buffer Manager** → Thread-safe storage in Analysis and Capture buffers
+3. **Model Manager** → Audio processing and analysis using BirdNET
+4. **Application Logic** → Bird detection results handling
 
 ## Key Components
 
@@ -114,6 +158,39 @@ Utilities for cross-platform compatibility:
 - **GetPlatformDefaultBackend**: Returns the appropriate audio backend for each OS
 - **Platform detection functions**: IsLinuxOS, IsWindowsOS, IsMacOS, IsUnixOS
 
+## Legacy vs. Modern Audio Components
+
+The audio system has undergone significant architectural improvements, moving from global functions to a structured, interface-based approach:
+
+### Legacy Components (Deprecated)
+
+The `myaudio` package (being gradually replaced):
+- Uses global variables and functions
+- Lacks proper dependency management
+- Has limited thread safety
+- Provides basic buffer functionality without clear separation of concerns
+
+### Modern Components (Recommended)
+
+The structured audio package hierarchy:
+- Uses interfaces for clean dependency injection
+- Implements proper concurrency protection
+- Features comprehensive error handling
+- Follows SOLID design principles
+- Enables better testability through mock implementations
+- Provides cleaner API boundaries between components
+
+### Migration Path
+
+Projects should transition from the legacy `myaudio` package to the modern audio components:
+
+1. Replace global function calls with BufferManager methods
+2. Inject dependencies rather than using global state
+3. Use the component factories to create properly connected instances
+4. Follow the usage examples in each subpackage README
+
+See the [Buffer README](buffer/README.md) for detailed migration steps.
+
 ## Data Flow
 
 1. **Audio Source** → Raw audio data is captured from devices or streams
@@ -148,6 +225,25 @@ The audio package is designed to work across:
 - **Linux**: Using ALSA backend for local devices, proper process handling for FFmpeg
 - **Windows**: Using WASAPI backend for local devices, tasklist for FFmpeg monitoring
 - **macOS**: Using CoreAudio backend for local devices, Unix-style process handling for FFmpeg
+
+## Dependencies
+
+The audio system has the following key dependencies:
+
+### External Libraries
+- **github.com/gen2brain/malgo**: Cross-platform audio library for device capture
+- **github.com/smallnest/ringbuffer**: Efficient ring buffer implementation for audio analysis buffers
+- **FFmpeg executable**: Required for stream processing and audio format conversion
+
+### Internal Dependencies
+- **github.com/tphakala/birdnet-go/internal/birdnet**: BirdNET model integration
+- **github.com/tphakala/birdnet-go/internal/conf**: Application configuration
+
+### Standard Library
+- **os/exec**: For process management (FFmpeg)
+- **sync**: For concurrency control (mutex, waitgroup)
+- **time**: For timing and timeout operations
+- **context**: For cancellation and deadline handling
 
 ## Usage Examples
 
@@ -215,46 +311,62 @@ streamManager.Stop()
 ffmpegMonitor.Stop()
 ```
 
-### Using Direct FFmpegStream Manager
-
-The audio package also allows you to use the FFmpegStream manager directly:
+### Complete Audio System Integration
 
 ```go
-// Create FFmpeg manager with path to FFmpeg executable
-manager := ffmpegstream.NewFFmpegManager("/usr/bin/ffmpeg")
+// Initialize the buffer manager
+factory := buffer.NewBufferFactory()
+bufferManager := factory.CreateBufferManager()
 
-// Set callbacks for audio data and levels
-manager.SetCallbacks(
-    // Process audio data
-    func(sourceID string, data []byte) {
-        // Process audio data (e.g., send to buffer or analyzer)
-    },
-    // Handle audio levels
-    func(level stream.AudioLevelData) {
-        // Update UI with audio levels
-        fmt.Printf("Audio level: %d%% for %s\n", level.Level, level.Source)
-    },
-)
+// Initialize the model manager with BirdNET
+settings := conf.Settings()
+modelManager := model.NewManager(settings)
 
-// Start the manager
-ctx := context.Background()
-manager.Start(ctx)
+// Set up audio capture
+captureFactory := capture.NewContextFactory(settings.Debug)
+audioCtx, _ := captureFactory.CreateAudioContext(logFunc)
+captureManager := capture.NewDeviceManager(audioCtx, bufferManager)
 
-// Add an RTSP stream
-manager.AddStream(stream.Config{
-    ID:        "camera1",
-    Name:      "Security Camera",
-    URL:       "rtsp://example.com/stream1",
-    Transport: "tcp",
-    Format: stream.AudioFormat{
-        SampleRate: 48000,
-        Channels:   1,
-        BitDepth:   16,
-    },
+// Set up audio streaming
+streamManager, ffmpegMonitor := audio.CreateAudioComponents(ffmpegPath)
+
+// Set up data callbacks
+captureManager.SetDataCallback(func(sourceID string, data []byte, frameCount uint32) {
+    // Send data to buffer manager
+    if err := bufferManager.WriteToAnalysisBuffer(sourceID, data); err != nil {
+        log.Printf("Error writing to analysis buffer: %v", err)
+        return
+    }
+    
+    // Also write to capture buffer for recording
+    if err := bufferManager.WriteToCaptureBuffer(sourceID, data); err != nil {
+        log.Printf("Error writing to capture buffer: %v", err)
+    }
+    
+    // Analyze audio data
+    analysisData, err := bufferManager.ReadFromAnalysisBuffer(sourceID, nil)
+    if err != nil || analysisData == nil {
+        return // Not enough data yet
+    }
+    
+    // Send to model for analysis
+    modelManager.Analyze(sourceID, analysisData, time.Now().Unix())
 })
 
-// When finished
-manager.Stop()
+// Start audio capture
+captureManager.StartCapture("deviceName", 48000, 1)
+
+// Start a stream
+streamManager.StartStream("rtsp://example.com/stream", "tcp")
+
+// Clean up when done
+func cleanup() {
+    captureManager.Close()
+    streamManager.Stop()
+    ffmpegMonitor.Stop()
+    bufferManager.CleanupAllBuffers()
+    modelManager.Cleanup()
+}
 ```
 
 ## Key Features
@@ -272,11 +384,3 @@ manager.Stop()
 - **Audio Export**: Convert PCM data to various formats (MP3, FLAC, AAC, etc.)
 - **Simple Integration**: Direct implementations of audio interfaces using the stream and FFmpeg packages
 - **Factory Functions**: Easy creation of connected components with sensible defaults
-
-## Dependencies
-
-- **github.com/gen2brain/malgo**: Cross-platform audio library
-- **github.com/smallnest/ringbuffer**: Efficient ring buffer implementation
-- **github.com/tphakala/birdnet-go/internal/birdnet**: BirdNET model integration
-- **github.com/tphakala/birdnet-go/internal/conf**: Application configuration
-- **External dependency**: FFmpeg executable for stream and audio processing
