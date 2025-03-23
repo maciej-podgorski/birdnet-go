@@ -313,7 +313,10 @@ func (m *Monitor) checkProcesses() error {
 		// If URL is not in configuration, stop the process
 		if !configuredURLs[url] {
 			fmt.Printf("Stopping orphaned FFmpeg process for URL %s\n", url)
-			proc.Stop()
+			if err := proc.Stop(); err != nil {
+				fmt.Printf("Error stopping FFmpeg process for URL %s: %v\n", url, err)
+				// Continue with unregistering even if there was an error stopping
+			}
 			m.tracker.UnregisterProcess(url)
 		}
 	}

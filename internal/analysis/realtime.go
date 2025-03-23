@@ -42,14 +42,14 @@ var bufferManager buffer.BufferManagerInterface
 func RealtimeAnalysis(settings *conf.Settings, notificationChan chan handlers.Notification) error {
 	// Initialize BirdNET interpreter
 	if err := initializeBirdNET(settings); err != nil {
-		return err
+		return fmt.Errorf("failed to initialize BirdNET: %w", err)
 	}
 
-	// Initialize model manager
+	// Initialize model manager - still global but will be injected into functions that need it
 	modelManager = model.NewManager(settings)
 	modelManager.SetDefaultInstance(bn)
 
-	// Initialize buffer manager
+	// Initialize buffer manager - still global but will be injected into functions that need it
 	bufferFactory := buffer.NewBufferFactory()
 	bufferManager = bufferFactory.CreateBufferManager()
 
@@ -57,10 +57,6 @@ func RealtimeAnalysis(settings *conf.Settings, notificationChan chan handlers.No
 	if settings.BirdNET.Debug {
 		log.Println("🔍 BirdNET Debug mode enabled - showing detailed prediction results")
 	}
-
-	// Initialize occurrence monitor to filter out repeated observations.
-	// TODO FIXME
-	//ctx.OccurrenceMonitor = conf.NewOccurrenceMonitor(time.Duration(ctx.Settings.Realtime.Interval) * time.Second)
 
 	// Get system details with golps
 	info, err := host.Info()
@@ -93,13 +89,11 @@ func RealtimeAnalysis(settings *conf.Settings, notificationChan chan handlers.No
 
 	// Open a connection to the database and handle possible errors.
 	if err := dataStore.Open(); err != nil {
-		//logger.Error("main", "Failed to open database: %v", err)
-		return err // Return error to stop execution if database connection fails.
-	} else {
-		//logger.Info("main", "Successfully opened database")
-		// Ensure the database connection is closed when the function returns.
-		defer closeDataStore(dataStore)
+		return fmt.Errorf("failed to open database: %w", err)
 	}
+
+	// Ensure the database connection is closed when the function returns.
+	defer closeDataStore(dataStore)
 
 	// Initialize the control channel for restart control.
 	controlChan := make(chan string, 1)
@@ -111,18 +105,8 @@ func RealtimeAnalysis(settings *conf.Settings, notificationChan chan handlers.No
 	// Initialize audioLevelChan, used to visualize audio levels on web ui
 	audioLevelChan = make(chan audio.AudioLevelData, 100)
 
-	// Prepare sources list
-	var sources []string
-	if len(settings.Realtime.RTSP.URLs) > 0 || settings.Realtime.Audio.Source != "" {
-		if len(settings.Realtime.RTSP.URLs) > 0 {
-			sources = settings.Realtime.RTSP.URLs
-		}
-		if settings.Realtime.Audio.Source != "" {
-			// We'll add malgo to sources only if device initialization succeeds
-			// This will be handled in startAudioCapture
-			sources = append(sources, "malgo")
-		}
-	} else {
+	// Check if we have any audio sources configured
+	if len(settings.Realtime.RTSP.URLs) == 0 && settings.Realtime.Audio.Source == "" {
 		log.Println("⚠️  Starting without active audio sources. You can configure audio devices or RTSP streams through the web interface.")
 	}
 
@@ -219,108 +203,145 @@ func getFFmpegPath(settings *conf.Settings) string {
 	return ffmpegPath
 }
 
-// processAudioData handles the common audio processing logic for all audio sources
-func processAudioData(sourceID string, data []byte, startTime time.Time) {
-	// Early return if model manager is not initialized
-	if modelManager == nil {
-		log.Printf("⚠️ Model manager not initialized, cannot process audio data from %s", sourceID)
-		return
-	}
-
-	// Check if analysis buffer exists for this source, create it if not
-	if !bufferManager.HasAnalysisBuffer(sourceID) {
-		// Calculate buffer size based on sample rate - use longer buffer (9 seconds) to ensure we always have enough data
-		// This is 3x the required size for BirdNET (3 seconds)
+// createBuffersIfNeeded ensures both analysis and capture buffers exist for a source
+func createBuffersIfNeeded(bufMgr buffer.BufferManagerInterface, sourceID string) error {
+	// Create analysis buffer if needed
+	if !bufMgr.HasAnalysisBuffer(sourceID) {
+		// Calculate buffer size - 9 seconds buffer (3x the 3 second BirdNET window)
 		sampleRate := conf.SampleRate
 		bytesPerSample := conf.BitDepth / 8
 		numChannels := conf.NumChannels
 		bufferSize := 9 * sampleRate * bytesPerSample * numChannels
 
-		err := bufferManager.AllocateAnalysisBuffer(bufferSize, sourceID)
-		if err != nil {
-			log.Printf("❌ Error creating analysis buffer for %s: %v", sourceID, err)
-			return
+		if err := bufMgr.AllocateAnalysisBuffer(bufferSize, sourceID); err != nil {
+			return fmt.Errorf("failed to create analysis buffer: %w", err)
 		}
 		log.Printf("✅ Created analysis buffer for source: %s", sourceID)
 	}
 
-	// Check if capture buffer exists for this source, create it if not
-	if !bufferManager.HasCaptureBuffer(sourceID) {
-		// Allocate a 60-second capture buffer for this source
+	// Create capture buffer if audio export is enabled
+	if conf.Setting().Realtime.Audio.Export.Enabled && !bufMgr.HasCaptureBuffer(sourceID) {
 		captureDuration := 60 // 60 seconds by default
-		if conf.Setting().Realtime.Audio.Export.Enabled {
-			// If audio export is enabled, ensure we have sufficient buffer
-			captureDuration = 60 // Can be adjusted based on settings if needed
-		}
-
-		err := bufferManager.AllocateCaptureBuffer(
-			captureDuration,
-			conf.SampleRate,
-			conf.BitDepth/8,
-			sourceID,
-		)
-
-		if err != nil {
-			log.Printf("❌ Error creating capture buffer for %s: %v", sourceID, err)
-			// Continue processing even if capture buffer creation fails
-			// We'll still be able to analyze audio, just not save clips
+		if err := bufMgr.AllocateCaptureBuffer(
+			captureDuration, conf.SampleRate, conf.BitDepth/8, sourceID,
+		); err != nil {
+			// Non-fatal error - we can continue without capture buffer
+			log.Printf("⚠️ Failed to create capture buffer for %s: %v", sourceID, err)
 		} else {
 			log.Printf("✅ Created capture buffer for source: '%s' (duration: %ds)", sourceID, captureDuration)
 		}
 	}
 
+	return nil
+}
+
+// writeToBuffers writes audio data to both analysis and capture buffers
+func writeToBuffers(bufMgr buffer.BufferManagerInterface, sourceID string, data []byte) error {
 	// Write data to the analysis buffer
-	if err := bufferManager.WriteToAnalysisBuffer(sourceID, data); err != nil {
-		log.Printf("❌ Error writing to analysis buffer for %s: %v", sourceID, err)
-		return
+	if err := bufMgr.WriteToAnalysisBuffer(sourceID, data); err != nil {
+		return fmt.Errorf("error writing to analysis buffer: %w", err)
 	}
 
 	// Write data to the capture buffer if it exists
-	if bufferManager.HasCaptureBuffer(sourceID) {
-		if err := bufferManager.WriteToCaptureBuffer(sourceID, data); err != nil {
+	if bufMgr.HasCaptureBuffer(sourceID) {
+		if err := bufMgr.WriteToCaptureBuffer(sourceID, data); err != nil {
+			// Non-fatal error, we can continue analysis without successful capture
 			log.Printf("⚠️ Error writing to capture buffer for %s: %v", sourceID, err)
-			// Continue processing even if capture buffer write fails
 		}
 	}
 
-	// Create a buffer config to use when reading from the buffer
+	return nil
+}
+
+// processAudioData handles the common audio processing logic for all audio sources
+func processAudioData(sourceID string, data []byte, startTime time.Time,
+	bufMgr buffer.BufferManagerInterface, modelMgr *model.Manager) {
+	// Early return if model manager is not initialized
+	if modelMgr == nil {
+		log.Printf("⚠️ Model manager not initialized, cannot process audio data from %s", sourceID)
+		return
+	}
+
+	// Create both buffers if needed
+	if err := createBuffersIfNeeded(bufMgr, sourceID); err != nil {
+		log.Printf("❌ %v", err)
+		return
+	}
+
+	// Write data to both buffers
+	if err := writeToBuffers(bufMgr, sourceID, data); err != nil {
+		log.Printf("❌ %v", err)
+		return
+	}
+
+	// Use a proper buffer config with default settings
 	bufferConfig := buffer.NewDefaultBufferConfig()
 
 	// Read from the analysis buffer using the proper buffer API
-	analysisData, err := bufferManager.ReadFromAnalysisBuffer(sourceID, bufferConfig)
+	analysisData, err := bufMgr.ReadFromAnalysisBuffer(sourceID, bufferConfig)
 	if err != nil || analysisData == nil {
 		// Not enough data yet or error, just return without analyzing
 		return
 	}
 
 	// Use the manager to analyze audio data
-	if err := modelManager.Analyze(sourceID, analysisData, startTime.Unix()); err != nil {
+	if err := modelMgr.Analyze(sourceID, analysisData, startTime.Unix()); err != nil {
 		log.Printf("❌ Error analyzing audio data from %s: %v", sourceID, err)
 	}
 }
 
+// removeBufferIfExists removes a buffer for the given source if it exists
+func removeBufferIfExists(bufferManager buffer.BufferManagerInterface, bufferType, sourceID string) {
+	if bufferType == "analysis" {
+		if bufferManager.HasAnalysisBuffer(sourceID) {
+			if err := bufferManager.RemoveAnalysisBuffer(sourceID); err != nil {
+				log.Printf("⚠️ Error removing analysis buffer for %s: %v", sourceID, err)
+			} else {
+				log.Printf("✅ Removed analysis buffer for %s", sourceID)
+			}
+		}
+	} else if bufferType == "capture" {
+		if bufferManager.HasCaptureBuffer(sourceID) {
+			if err := bufferManager.RemoveCaptureBuffer(sourceID); err != nil {
+				log.Printf("⚠️ Error removing capture buffer for %s: %v", sourceID, err)
+			} else {
+				log.Printf("✅ Removed capture buffer for %s", sourceID)
+			}
+		}
+	}
+}
+
+// RemoveAllBuffersForSource removes both analysis and capture buffers for a given source
+func RemoveAllBuffersForSource(bufMgr buffer.BufferManagerInterface, sourceID string) {
+	// Remove analysis buffer if it exists
+	if bufMgr.HasAnalysisBuffer(sourceID) {
+		if err := bufMgr.RemoveAnalysisBuffer(sourceID); err != nil {
+			log.Printf("⚠️ Error removing analysis buffer for %s: %v", sourceID, err)
+		} else {
+			log.Printf("✅ Removed analysis buffer for %s", sourceID)
+		}
+	}
+
+	// Remove capture buffer if it exists
+	if bufMgr.HasCaptureBuffer(sourceID) {
+		if err := bufMgr.RemoveCaptureBuffer(sourceID); err != nil {
+			log.Printf("⚠️ Error removing capture buffer for %s: %v", sourceID, err)
+		} else {
+			log.Printf("✅ Removed capture buffer for %s", sourceID)
+		}
+	}
+}
+
 // initAudioDevice initializes and starts the audio device capture
-func initAudioDevice(wg *sync.WaitGroup, settings *conf.Settings, quitChan chan struct{}) {
+func initAudioDevice(wg *sync.WaitGroup, settings *conf.Settings, quitChan chan struct{},
+	bufMgr buffer.BufferManagerInterface, modelMgr *model.Manager) {
+
 	deviceName := settings.Realtime.Audio.Source
 	if deviceName == "" {
 		// If no device is configured, check if we need to clean up previous device buffers
-		if bufferManager != nil {
-			// Try to find and deallocate any "malgo" device buffers from previous configurations
-			if bufferManager.HasAnalysisBuffer("malgo") {
-				if err := bufferManager.RemoveAnalysisBuffer("malgo"); err != nil {
-					log.Printf("⚠️ Error removing analysis buffer for audio device: %v", err)
-				} else {
-					log.Printf("✅ Removed analysis buffer for inactive audio device")
-				}
-			}
-
-			if bufferManager.HasCaptureBuffer("malgo") {
-				if err := bufferManager.RemoveCaptureBuffer("malgo"); err != nil {
-					log.Printf("⚠️ Error removing capture buffer for audio device: %v", err)
-				} else {
-					log.Printf("✅ Removed capture buffer for inactive audio device")
-				}
-			}
+		if bufMgr != nil {
+			// Clean up any buffers from previous audio device configuration
+			RemoveAllBuffersForSource(bufMgr, "malgo")
 		}
 		return
 	}
@@ -342,26 +363,39 @@ func initAudioDevice(wg *sync.WaitGroup, settings *conf.Settings, quitChan chan 
 
 	// Set data callback to process audio from the device
 	captureManager.SetDataCallback(func(sourceID string, data []byte, frameCount uint32) {
-		processAudioData(sourceID, data, time.Now())
+		// Use our consolidated processing function
+		processAudioData(sourceID, data, time.Now(), bufMgr, modelMgr)
 	})
 
 	// Start capturing from the audio device
 	if err := captureManager.StartCapture(deviceName, conf.SampleRate, conf.NumChannels); err != nil {
 		log.Printf("❌ Error starting capture from audio device %s: %v", deviceName, err)
-		audioCtx.Uninit() // Clean up the context if we fail to start capture
+		// Clean up the context if we fail to start capture
+		if uninitErr := audioCtx.Uninit(); uninitErr != nil {
+			log.Printf("⚠️ Error uninitializing audio context: %v", uninitErr)
+		}
 		return
 	}
 
 	log.Printf("✅ Started audio capture from device: %s", deviceName)
 
 	// Add cleanup for the device manager
+	registerCleanupHandler(wg, quitChan, func() {
+		log.Println("Stopping audio device capture...")
+		captureManager.Close()
+		if err := audioCtx.Uninit(); err != nil {
+			log.Printf("⚠️ Error uninitializing audio context during cleanup: %v", err)
+		}
+	})
+}
+
+// registerCleanupHandler adds a cleanup handler that runs when quit signal is received
+func registerCleanupHandler(wg *sync.WaitGroup, quitChan chan struct{}, cleanupFunc func()) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		<-quitChan
-		log.Println("Stopping audio device capture...")
-		captureManager.Close()
-		audioCtx.Uninit()
+		cleanupFunc()
 	}()
 }
 
@@ -390,16 +424,54 @@ func initRTSPStreams(settings *conf.Settings, streamManager audio.StreamManager)
 }
 
 // initStreamManager initializes and configures the stream manager
-func initStreamManager(ffmpegPath string, audioLevelChan chan audio.AudioLevelData) (audio.StreamManager, audio.FFmpegMonitorInterface, error) {
-	// Create stream manager and FFmpeg monitor
+func initStreamManager(ffmpegPath string, audioLevelChan chan audio.AudioLevelData,
+	bufMgr buffer.BufferManagerInterface, modelMgr *model.Manager) (audio.StreamManager, audio.FFmpegMonitorInterface, error) {
+
+	// Create stream manager and FFmpeg monitor using the provided factory function
 	streamManager, ffmpegMonitor := audio.CreateAudioComponents(ffmpegPath)
+	if streamManager == nil || ffmpegMonitor == nil {
+		return nil, nil, fmt.Errorf("failed to create audio components with FFmpeg path: %s", ffmpegPath)
+	}
+
+	// Create a data callback closure that handles the audio processing
+	dataCallback := func(sourceID, sourceName string, data []byte) {
+		// Skip processing if model manager is not available
+		if modelMgr == nil {
+			log.Printf("⚠️ Model manager not initialized, cannot process audio data from %s", sourceID)
+			return
+		}
+
+		// Create both buffers if needed
+		if err := createBuffersIfNeeded(bufMgr, sourceID); err != nil {
+			log.Printf("❌ Failed to create buffers for %s: %v", sourceID, err)
+			return
+		}
+
+		// Write to both buffers - analysis and capture if it exists
+		if err := writeToBuffers(bufMgr, sourceID, data); err != nil {
+			log.Printf("❌ %v", err)
+			return
+		}
+
+		// Get analysis data using default buffer config
+		bufferConfig := buffer.NewDefaultBufferConfig()
+		analysisData, err := bufMgr.ReadFromAnalysisBuffer(sourceID, bufferConfig)
+		if err != nil || analysisData == nil {
+			// Not enough data yet or error, just return without analyzing
+			return
+		}
+
+		// Analyze the audio data
+		now := time.Now()
+		if err := modelMgr.Analyze(sourceID, analysisData, now.Unix()); err != nil {
+			log.Printf("❌ Error analyzing audio data from %s: %v", sourceID, err)
+		}
+	}
 
 	// Set up callbacks for the stream manager
 	streamManager.SetCallbacks(
 		// Data callback - process the audio data
-		func(sourceID, sourceName string, data []byte) {
-			processAudioData(sourceID, data, time.Now())
-		},
+		dataCallback,
 		// Level callback - forward audio levels to the UI
 		func(levelData audio.AudioLevelData) {
 			select {
@@ -420,20 +492,8 @@ func initStreamManager(ffmpegPath string, audioLevelChan chan audio.AudioLevelDa
 		return streamManager, ffmpegMonitor, fmt.Errorf("failed to start stream manager: %w", err)
 	}
 
+	log.Printf("✅ Initialized stream manager with FFmpeg path: %s", ffmpegPath)
 	return streamManager, ffmpegMonitor, nil
-}
-
-// registerCleanup sets up a goroutine to handle cleanup of audio components when quit signal is received
-func registerCleanup(wg *sync.WaitGroup, quitChan chan struct{}, streamManager audio.StreamManager, ffmpegMonitor audio.FFmpegMonitorInterface) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-quitChan
-		log.Println("Stopping stream manager...")
-		streamManager.Stop()
-		log.Println("Stopping FFmpeg monitor...")
-		ffmpegMonitor.Stop()
-	}()
 }
 
 // startAudioCapture initializes and starts the audio capture routine in a new goroutine.
@@ -443,31 +503,34 @@ func startAudioCapture(wg *sync.WaitGroup, settings *conf.Settings, quitChan, re
 	// Get the appropriate FFmpeg path
 	ffmpegPath := getFFmpegPath(settings)
 
-	// Initialize stream manager
-	streamManager, ffmpegMonitor, err := initStreamManager(ffmpegPath, audioLevelChan)
+	// Initialize stream manager with proper buffer and model managers
+	streamManager, ffmpegMonitor, err := initStreamManager(ffmpegPath, audioLevelChan, bufferManager, modelManager)
 	if err != nil {
 		log.Printf("❌ %v", err)
 	}
 
 	// Initialize audio device if configured
-	initAudioDevice(wg, settings, quitChan)
+	initAudioDevice(wg, settings, quitChan, bufferManager, modelManager)
 
 	// Initialize RTSP streams if configured
 	initRTSPStreams(settings, streamManager)
 
 	// Register cleanup for the audio components
-	registerCleanup(wg, quitChan, streamManager, ffmpegMonitor)
+	registerCleanupHandler(wg, quitChan, func() {
+		log.Println("Stopping stream manager...")
+		streamManager.Stop()
+		log.Println("Stopping FFmpeg monitor...")
+		ffmpegMonitor.Stop()
+	})
 
 	return streamManager, ffmpegMonitor
 }
 
 // startClipCleanupMonitor initializes and starts the clip cleanup monitoring routine in a new goroutine.
 func startClipCleanupMonitor(wg *sync.WaitGroup, quitChan chan struct{}, dataStore datastore.Interface) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	registerCleanupHandler(wg, quitChan, func() {
 		clipCleanupMonitor(quitChan, dataStore)
-	}()
+	})
 }
 
 // startWeatherPolling initializes and starts the weather polling routine in a new goroutine.
@@ -479,26 +542,27 @@ func startWeatherPolling(wg *sync.WaitGroup, settings *conf.Settings, dataStore 
 		return
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	registerCleanupHandler(wg, quitChan, func() {
 		weatherService.StartPolling(quitChan)
-	}()
+	})
 }
 
+// startTelemetryEndpoint initializes and starts the telemetry endpoint if enabled
 func startTelemetryEndpoint(wg *sync.WaitGroup, settings *conf.Settings, metrics *telemetry.Metrics, quitChan chan struct{}) {
 	// Initialize Prometheus metrics endpoint if enabled
-	if settings.Realtime.Telemetry.Enabled {
-		// Initialize metrics endpoint
-		telemetryEndpoint, err := telemetry.NewEndpoint(settings, metrics)
-		if err != nil {
-			log.Printf("Error initializing telemetry endpoint: %v", err)
-			return
-		}
-
-		// Start metrics server
-		telemetryEndpoint.Start(wg, quitChan)
+	if !settings.Realtime.Telemetry.Enabled {
+		return
 	}
+
+	// Initialize metrics endpoint
+	telemetryEndpoint, err := telemetry.NewEndpoint(settings, metrics)
+	if err != nil {
+		log.Printf("Error initializing telemetry endpoint: %v", err)
+		return
+	}
+
+	// Start metrics server
+	telemetryEndpoint.Start(wg, quitChan)
 }
 
 // monitorCtrlC listens for the SIGINT (Ctrl+C) signal and triggers the application shutdown process.
@@ -521,6 +585,16 @@ func closeDataStore(store datastore.Interface) {
 	} else {
 		log.Println("Successfully closed database")
 	}
+}
+
+// logOperation logs the result of an operation with standardized emojis
+func logOperation(success bool, successMsg, errorMsg string, err error) error {
+	if success {
+		log.Printf("✅ %s", successMsg)
+		return nil
+	}
+	log.Printf("❌ %s: %v", errorMsg, err)
+	return err
 }
 
 // ClipCleanupMonitor monitors the database and deletes clips that meet the retention policy.
@@ -632,7 +706,7 @@ func startControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, 
 	notificationChan chan handlers.Notification, proc *processor.Processor,
 	streamManager audio.StreamManager, ffmpegMonitor audio.FFmpegMonitorInterface) {
 
-	monitor := NewControlMonitor(wg, controlChan, quitChan, restartChan, notificationChan, proc)
+	monitor := NewControlMonitor(wg, controlChan, quitChan, restartChan, notificationChan, proc, bufferManager)
 
 	// Connect the stream components to the control monitor
 	if streamManager != nil && ffmpegMonitor != nil {

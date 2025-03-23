@@ -161,11 +161,8 @@ func (b *CommandBuilder) Build() []string {
 	// Add output options
 	args = append(args, b.outputOpts...)
 
-	// Force overwrite
-	args = append(args, "-y")
-
-	// Add output
-	args = append(args, b.output)
+	// Force overwrite and add output
+	args = append(args, "-y", b.output)
 
 	return args
 }

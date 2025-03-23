@@ -24,7 +24,7 @@ type ExportOptions struct {
 }
 
 // Export exports PCM audio data to a file in the specified format
-func Export(ctx context.Context, data []byte, opts ExportOptions) error {
+func Export(ctx context.Context, data []byte, opts *ExportOptions) error {
 	// Validate options
 	if opts.FFmpegPath == "" {
 		return fmt.Errorf("FFmpeg path not specified")

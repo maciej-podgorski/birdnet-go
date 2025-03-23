@@ -65,7 +65,7 @@ func (m *FFmpegManager) SetCallbacks(onData stream.DataCallback, onLevel stream.
 }
 
 // AddStream adds a stream to the manager
-func (m *FFmpegManager) AddStream(config stream.Config) error {
+func (m *FFmpegManager) AddStream(config *stream.Config) error {
 	// Create the FFmpeg process starter function
 	processStarter := func(ctx context.Context, cfg stream.Config) (io.ReadCloser, error) {
 		// Create stream source configuration
@@ -190,5 +190,5 @@ func (m *FFmpegManager) ExportAudio(ctx context.Context, data []byte, outputPath
 	}
 
 	// Export the audio
-	return ffmpeg.Export(ctx, data, opts)
+	return ffmpeg.Export(ctx, data, &opts)
 }

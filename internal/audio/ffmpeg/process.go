@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"time"
@@ -182,7 +183,11 @@ func (p *Process) collectStderr() {
 	scanner := bufio.NewScanner(p.stderr)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		p.stderrBuf.Write(append(line, '\n'))
+		_, err := p.stderrBuf.Write(append(line, '\n'))
+		if err != nil {
+			// Just log the error and continue; we don't want to crash the stderr collector
+			log.Printf("Error writing to stderr buffer: %v", err)
+		}
 	}
 }
 

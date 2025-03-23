@@ -9,6 +9,7 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
 	"github.com/tphakala/birdnet-go/internal/audio"
+	"github.com/tphakala/birdnet-go/internal/audio/buffer"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -28,10 +29,11 @@ type ControlMonitor struct {
 	bn               *birdnet.BirdNET
 	streamManager    audio.StreamManager
 	ffmpegMonitor    audio.FFmpegMonitorInterface
+	bufferManager    buffer.BufferManagerInterface
 }
 
 // NewControlMonitor creates a new ControlMonitor instance
-func NewControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, restartChan chan struct{}, notificationChan chan handlers.Notification, proc *processor.Processor) *ControlMonitor {
+func NewControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, restartChan chan struct{}, notificationChan chan handlers.Notification, proc *processor.Processor, bufferManager buffer.BufferManagerInterface) *ControlMonitor {
 	return &ControlMonitor{
 		wg:               wg,
 		controlChan:      controlChan,
@@ -41,6 +43,7 @@ func NewControlMonitor(wg *sync.WaitGroup, controlChan chan string, quitChan, re
 		proc:             proc,
 		audioLevelChan:   make(chan audio.AudioLevelData),
 		bn:               proc.Bn,
+		bufferManager:    bufferManager,
 	}
 }
 
@@ -180,27 +183,29 @@ func (cm *ControlMonitor) handleReconfigureRTSP() {
 		// Add RTSP streams if configured
 		if len(settings.Realtime.RTSP.URLs) > 0 {
 			for _, url := range settings.Realtime.RTSP.URLs {
-				if url != "" {
-					transport := settings.Realtime.RTSP.Transport
-					if transport == "" {
-						transport = "tcp" // Default to TCP if not specified
-					}
+				if url == "" {
+					continue
+				}
 
-					// Mark this source as active in the new configuration
-					sourceID := url
-					newActiveSources[sourceID] = true
+				transport := settings.Realtime.RTSP.Transport
+				if transport == "" {
+					transport = "tcp" // Default to TCP if not specified
+				}
 
-					if err := cm.streamManager.StartStream(url, transport); err != nil {
-						log.Printf("\033[31m❌ Error starting stream %s: %v\033[0m", url, err)
-					} else {
-						log.Printf("\033[32m✅ Started stream: %s\033[0m", url)
-					}
+				// Mark this source as active in the new configuration
+				sourceID := url
+				newActiveSources[sourceID] = true
+
+				if err := cm.streamManager.StartStream(url, transport); err != nil {
+					log.Printf("\033[31m❌ Error starting stream %s: %v\033[0m", url, err)
+				} else {
+					log.Printf("\033[32m✅ Started stream: %s\033[0m", url)
 				}
 			}
 		}
 
 		// Cleanup buffers for sources that were removed
-		if bufferManager != nil {
+		if cm.bufferManager != nil {
 			for _, sourceID := range activeStreams {
 				// Skip if source is still active in new configuration
 				if newActiveSources[sourceID] {
@@ -210,23 +215,8 @@ func (cm *ControlMonitor) handleReconfigureRTSP() {
 				// Source was removed, deallocate its buffers
 				log.Printf("\033[33m🧹 Removing buffers for inactive source: %s\033[0m", sourceID)
 
-				// Remove analysis buffer if it exists
-				if bufferManager.HasAnalysisBuffer(sourceID) {
-					if err := bufferManager.RemoveAnalysisBuffer(sourceID); err != nil {
-						log.Printf("\033[31m❌ Error removing analysis buffer for %s: %v\033[0m", sourceID, err)
-					} else {
-						log.Printf("\033[32m✅ Removed analysis buffer for source: %s\033[0m", sourceID)
-					}
-				}
-
-				// Remove capture buffer if it exists
-				if bufferManager.HasCaptureBuffer(sourceID) {
-					if err := bufferManager.RemoveCaptureBuffer(sourceID); err != nil {
-						log.Printf("\033[31m❌ Error removing capture buffer for %s: %v\033[0m", sourceID, err)
-					} else {
-						log.Printf("\033[32m✅ Removed capture buffer for source: %s\033[0m", sourceID)
-					}
-				}
+				// Remove all buffers for this source
+				RemoveAllBuffersForSource(cm.bufferManager, sourceID)
 			}
 		}
 

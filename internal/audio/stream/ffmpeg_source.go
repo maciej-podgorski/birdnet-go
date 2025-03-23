@@ -25,14 +25,14 @@ type FFmpegSource struct {
 type FFmpegProcessStarter func(context.Context, Config) (io.ReadCloser, error)
 
 // NewFFmpegSource creates a new FFmpeg-based stream source
-func NewFFmpegSource(config Config, processStarter FFmpegProcessStarter) *FFmpegSource {
+func NewFFmpegSource(config *Config, processStarter FFmpegProcessStarter) *FFmpegSource {
 	if config.InactiveTime == 0 {
 		// Default inactive time if not specified
 		config.InactiveTime = 60 * time.Second
 	}
 
 	return &FFmpegSource{
-		config:       config,
+		config:       *config,
 		processStart: processStarter,
 		lastData:     time.Now(),
 	}
@@ -139,7 +139,10 @@ func (s *FFmpegSource) runWatchdog() {
 
 					// Only restart if still active
 					if active {
-						s.Stop()
+						if err := s.Stop(); err != nil {
+							fmt.Printf("Error stopping stream %s: %v\n", s.config.ID, err)
+							// Continue with restart attempt despite the error
+						}
 						ctx := context.Background()
 						_, _ = s.Start(ctx) // Ignore errors, we'll retry next tick if needed
 					}

@@ -2,6 +2,7 @@ package audio
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/audio/ffmpeg"
@@ -74,7 +75,9 @@ func (m *FFmpegStreamManager) Stop() {
 	m.cancel()
 	// Create new context for potential future use
 	m.ctx, m.cancel = context.WithCancel(context.Background())
-	m.manager.Stop()
+	if err := m.manager.Stop(); err != nil {
+		fmt.Printf("Error stopping FFmpeg manager: %v\n", err)
+	}
 }
 
 // StartStream starts capture from a stream
@@ -92,7 +95,7 @@ func (m *FFmpegStreamManager) StartStream(url, transport string) error {
 		InactiveTime: 60 * time.Second,
 	}
 
-	return m.manager.AddStream(config)
+	return m.manager.AddStream(&config)
 }
 
 // StopStream stops capture from a stream
@@ -104,7 +107,10 @@ func (m *FFmpegStreamManager) StopStream(url string) error {
 func (m *FFmpegStreamManager) StopAllStreams() {
 	sources := m.manager.ListStreams()
 	for _, source := range sources {
-		m.manager.RemoveStream(source.ID())
+		if err := m.manager.RemoveStream(source.ID()); err != nil {
+			fmt.Printf("Error removing stream %s: %v\n", source.ID(), err)
+			// Continue trying to remove other streams despite errors
+		}
 	}
 }
 
