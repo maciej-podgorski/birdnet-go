@@ -278,6 +278,7 @@ func calculateTotalChunks(fileInfo *file.Info, overlap float64) int {
 	return chunkCount
 }
 
+// processAudioFile handles the processing of an audio file
 func processAudioFile(settings *conf.Settings, fileManager file.Manager, fileInfo *file.Info, ctx context.Context) ([]datastore.Note, error) {
 	// Calculate total chunks
 	totalChunks := calculateTotalChunks(fileInfo, settings.BirdNET.Overlap)
@@ -351,6 +352,7 @@ func processAudioFile(settings *conf.Settings, fileManager file.Manager, fileInf
 	resultChan := make(chan []datastore.Note, 4)
 	errorChan := make(chan error, 1)
 	doneChan := make(chan struct{})
+	eofChan := make(chan struct{}, 1) // Add new channel for signaling EOF
 
 	var allNotes []datastore.Note
 
@@ -402,6 +404,13 @@ func processAudioFile(settings *conf.Settings, fileManager file.Manager, fileInf
 				processingErrorMutex.Lock()
 				processingError = err
 				processingErrorMutex.Unlock()
+				return
+			case <-eofChan:
+				// EOF reached, exit even if we haven't processed all expected chunks
+				if settings.Debug {
+					fmt.Printf("DEBUG: Received EOF signal, processed %d/%d chunks\n",
+						atomic.LoadInt64(&chunkCount)-1, totalChunks)
+				}
 				return
 			case <-time.After(5 * time.Second):
 				if settings.Debug {
@@ -464,6 +473,7 @@ func processAudioFile(settings *conf.Settings, fileManager file.Manager, fileInf
 		fmt.Println("DEBUG: Finished reading audio file")
 	}
 	close(chunkChan)
+	eofChan <- struct{}{} // Signal that EOF was reached
 
 	if settings.Debug {
 		fmt.Println("DEBUG: Waiting for processing to complete")

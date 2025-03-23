@@ -20,6 +20,11 @@ type WAVReader struct {
 	lastPos int // Position of the last read sample
 	isOpen  bool
 	debug   bool
+
+	// New fields for buffered reading
+	currentChunk []float32 // Buffer holding all current audio data
+	stepSamples  int       // How many samples to advance after each chunk
+	chunkSamples int       // Samples in a standard chunk (3 seconds)
 }
 
 // NewWAVReader creates a new WAV file reader.
@@ -76,6 +81,9 @@ func (r *WAVReader) Open(filePath string) error {
 	r.lastPos = 0
 	r.isOpen = true
 
+	// Reset buffer state
+	r.currentChunk = nil
+
 	if r.debug {
 		fmt.Printf("WAV Info: %+v\n", r.info)
 	}
@@ -86,6 +94,7 @@ func (r *WAVReader) Open(filePath string) error {
 // Close closes the file and releases resources.
 func (r *WAVReader) Close() error {
 	r.isOpen = false
+	r.currentChunk = nil
 	if r.file != nil {
 		return r.file.Close()
 	}
@@ -114,104 +123,166 @@ func getAudioDivisor(bitDepth int) (float32, error) {
 	}
 }
 
-// ReadChunk reads the next chunk of audio data.
-func (r *WAVReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
-	if !r.isOpen {
-		return Chunk{}, errors.New("file not open")
-	}
-
-	// Calculate number of samples in this chunk
-	chunkSamples := int(chunkDuration * float64(r.info.SampleRate))
-
+// fillBuffer reads more data into the buffer
+func (r *WAVReader) fillBuffer(minSamples int) error {
 	if r.debug {
-		fmt.Printf("DEBUG WAV Reader: Reading chunk of %d samples, current position %d, total samples %d\n",
-			chunkSamples, r.lastPos, r.info.TotalSamples)
+		fmt.Printf("DEBUG WAV Reader: Filling buffer, need %d samples, have %d\n",
+			minSamples, len(r.currentChunk))
 	}
 
-	// Check if we've reached the end of the file
-	if r.lastPos >= r.info.TotalSamples {
-		if r.debug {
-			fmt.Printf("DEBUG WAV Reader: Already at end of file, position %d >= total samples %d\n",
-				r.lastPos, r.info.TotalSamples)
-		}
-		return Chunk{}, io.EOF
+	// Only read as many as we need
+	samplesToRead := minSamples - len(r.currentChunk)
+	if samplesToRead <= 0 {
+		return nil
 	}
 
-	// Seek to the current position before reading
-	if err := r.Seek(r.lastPos); err != nil {
-		return Chunk{}, fmt.Errorf("error seeking to position %d: %w", r.lastPos, err)
-	}
-
-	// Buffer to hold the PCM data
+	// Create a buffer for reading
 	buf := &audio.IntBuffer{
-		Data:   make([]int, chunkSamples),
+		Data:   make([]int, samplesToRead),
 		Format: &audio.Format{SampleRate: r.info.SampleRate, NumChannels: r.info.NumChannels},
 	}
 
 	// Read samples from the decoder
 	n, err := r.decoder.PCMBuffer(buf)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return Chunk{}, fmt.Errorf("error reading WAV data: %w", err)
+		return fmt.Errorf("error reading WAV data: %w", err)
 	}
 
-	// If we read 0 samples and got EOF, we're done
-	if n == 0 && (err == io.EOF || err == nil) {
-		if r.debug {
-			fmt.Printf("DEBUG WAV Reader: Reached EOF at position %d of %d total samples\n",
-				r.lastPos, r.info.TotalSamples)
+	// If we read data, convert and add to our buffer
+	if n > 0 {
+		// Get the divisor for normalizing samples
+		divisor, err := getAudioDivisor(r.info.BitDepth)
+		if err != nil {
+			return err
 		}
-		return Chunk{}, io.EOF
-	}
 
-	// Get the divisor for normalizing samples
-	divisor, err := getAudioDivisor(r.info.BitDepth)
-	if err != nil {
-		return Chunk{}, err
-	}
-
-	// Convert int samples to float32
-	floatData := make([]float32, n)
-	for i := 0; i < n; i++ {
-		floatData[i] = float32(buf.Data[i]) / divisor
-	}
-
-	// If we didn't read a full chunk, pad with zeros
-	if n < chunkSamples {
-		if r.debug {
-			fmt.Printf("DEBUG WAV Reader: Padding chunk with %d zeros (read %d of %d samples)\n",
-				chunkSamples-n, n, chunkSamples)
+		// Convert int samples to float32 and add to current chunk
+		floatData := make([]float32, n)
+		for i := 0; i < n; i++ {
+			floatData[i] = float32(buf.Data[i]) / divisor
 		}
-		floatData = append(floatData, make([]float32, chunkSamples-n)...)
+
+		r.currentChunk = append(r.currentChunk, floatData...)
+
+		if r.debug {
+			fmt.Printf("DEBUG WAV Reader: Added %d samples to buffer, total now %d\n",
+				n, len(r.currentChunk))
+		}
 	}
+
+	return err // Return EOF if we hit the end
+}
+
+// ReadChunk reads the next chunk of audio data.
+func (r *WAVReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
+	if !r.isOpen {
+		return Chunk{}, errors.New("file not open")
+	}
+
+	// Initialize buffer on first call
+	if r.currentChunk == nil {
+		// Calculate key parameters
+		r.chunkSamples = int(chunkDuration * float64(r.info.SampleRate))
+		r.stepSamples = int((chunkDuration - overlap) * float64(r.info.SampleRate))
+
+		if r.debug {
+			fmt.Printf("DEBUG WAV Reader: Initializing with chunk size %d samples, step %d samples\n",
+				r.chunkSamples, r.stepSamples)
+		}
+
+		// Create a large buffer (8 complete chunks worth like in the old code)
+		bufferSize := 8 * r.chunkSamples
+
+		// Fill initial buffer
+		if err := r.fillBuffer(bufferSize); err != nil && !errors.Is(err, io.EOF) {
+			return Chunk{}, err
+		}
+	}
+
+	// Check if we need more data
+	if len(r.currentChunk) < r.chunkSamples {
+		// Reached end of file
+		if r.lastPos >= r.info.TotalSamples {
+			if r.debug {
+				fmt.Printf("DEBUG WAV Reader: Already at end of file, position %d >= total samples %d\n",
+					r.lastPos, r.info.TotalSamples)
+			}
+			return Chunk{}, io.EOF
+		}
+
+		// Try to read more data
+		if err := r.fillBuffer(r.chunkSamples * 4); err != nil && !errors.Is(err, io.EOF) {
+			return Chunk{}, err
+		}
+
+		// If we still don't have enough data, check if we have at least 1.5 seconds
+		// (matching the behavior in the old code)
+		minSamples := int(1.5 * float64(r.info.SampleRate))
+		if len(r.currentChunk) < minSamples {
+			if r.debug {
+				fmt.Printf("DEBUG WAV Reader: Not enough samples at end of file, have %d, need %d\n",
+					len(r.currentChunk), minSamples)
+			}
+			return Chunk{}, io.EOF
+		}
+	}
+
+	// Prepare the chunk to return
+	var chunk Chunk
 
 	// Calculate start time relative to the beginning of the file
-	sampleOffset := r.lastPos
-	startTime := time.Duration(float64(sampleOffset) / float64(r.info.SampleRate) * float64(time.Second))
+	startTime := time.Duration(float64(r.lastPos) / float64(r.info.SampleRate) * float64(time.Second))
 
-	// Update the position for the next read
-	// Calculate step size in samples based on chunk duration and overlap in seconds
-	stepSamples := int((chunkDuration - overlap) * float64(r.info.SampleRate))
-	r.lastPos += stepSamples
-
-	if r.debug {
-		fmt.Printf("DEBUG WAV Reader: Advanced position by %d samples to %d, overlap %.2f seconds\n",
-			stepSamples, r.lastPos, overlap)
-	}
-
-	// Check if next position would be beyond the file
-	if r.lastPos >= r.info.TotalSamples {
+	// Handle the case where we have some data but not a full chunk
+	dataLen := len(r.currentChunk)
+	if dataLen < r.chunkSamples {
+		// Pad with zeros if we don't have a full chunk
 		if r.debug {
-			fmt.Printf("DEBUG WAV Reader: Next position %d would exceed total samples %d\n",
-				r.lastPos, r.info.TotalSamples)
+			fmt.Printf("DEBUG WAV Reader: Padding chunk with %d zeros (have %d of %d samples)\n",
+				r.chunkSamples-dataLen, dataLen, r.chunkSamples)
+		}
+
+		paddedData := make([]float32, r.chunkSamples)
+		copy(paddedData, r.currentChunk)
+
+		chunk = Chunk{
+			Data:         paddedData,
+			StartTime:    time.Time{}.Add(startTime),
+			SampleOffset: r.lastPos,
+			NumSamples:   dataLen,
+		}
+
+		// Advance position and clear buffer since we're at EOF
+		r.lastPos += r.stepSamples
+		r.currentChunk = nil
+	} else {
+		// Normal case - return full chunk and advance window
+		chunk = Chunk{
+			Data:         r.currentChunk[:r.chunkSamples],
+			StartTime:    time.Time{}.Add(startTime),
+			SampleOffset: r.lastPos,
+			NumSamples:   r.chunkSamples,
+		}
+
+		// Advance our sliding window
+		r.lastPos += r.stepSamples
+
+		// Slide the window forward
+		if r.stepSamples >= len(r.currentChunk) {
+			// Step is larger than our buffer, just clear it
+			r.currentChunk = nil
+		} else {
+			// Normal sliding window
+			r.currentChunk = r.currentChunk[r.stepSamples:]
 		}
 	}
 
-	return Chunk{
-		Data:         floatData,
-		StartTime:    time.Time{}.Add(startTime), // Using zero time as base
-		SampleOffset: sampleOffset,
-		NumSamples:   n,
-	}, nil
+	if r.debug {
+		fmt.Printf("DEBUG WAV Reader: Returned chunk from position %d, advanced to %d\n",
+			chunk.SampleOffset, r.lastPos)
+	}
+
+	return chunk, nil
 }
 
 // ProcessFile processes the entire file in chunks.
@@ -220,10 +291,13 @@ func (r *WAVReader) ProcessFile(ctx context.Context, chunkDuration float64, over
 		return errors.New("file not open")
 	}
 
-	// Seek to the beginning of the file
-	if err := r.Seek(0); err != nil {
-		return err
-	}
+	// Reset any existing buffer and position
+	r.currentChunk = nil
+	r.lastPos = 0
+
+	// Seek to the beginning of the file and reset decoder
+	r.file.Seek(0, io.SeekStart)
+	r.decoder = wav.NewDecoder(r.file)
 
 	for {
 		select {
@@ -233,6 +307,9 @@ func (r *WAVReader) ProcessFile(ctx context.Context, chunkDuration float64, over
 			// Read next chunk
 			chunk, err := r.ReadChunk(chunkDuration, overlap)
 			if errors.Is(err, io.EOF) {
+				if r.debug {
+					fmt.Println("DEBUG WAV Reader: Reached EOF, processing complete")
+				}
 				return nil // Reached end of file, processing complete
 			}
 			if err != nil {
@@ -253,8 +330,11 @@ func (r *WAVReader) Seek(sampleOffset int) error {
 		return errors.New("file not open")
 	}
 
-	// WAV decoder doesn't have a direct seek method, so we need to reopen the file
-	// and read up to the desired position
+	// Reset our buffer and position
+	r.currentChunk = nil
+	r.lastPos = sampleOffset
+
+	// Reopen the file to reset the decoder state
 	filePath := r.info.Path
 	r.Close()
 
@@ -262,10 +342,10 @@ func (r *WAVReader) Seek(sampleOffset int) error {
 		return err
 	}
 
-	// Skip samples until we reach the desired offset
-	// This is inefficient but works as a basic implementation
+	// Now we need to skip forward to our position
 	if sampleOffset > 0 {
-		chunkSize := 4096 // Read in 4K chunks for efficiency
+		// This is inefficient, but only happens on explicit seeks
+		chunkSize := 8192 // Read in larger chunks for skipping
 		buf := &audio.IntBuffer{
 			Data:   make([]int, chunkSize),
 			Format: &audio.Format{SampleRate: r.info.SampleRate, NumChannels: r.info.NumChannels},
@@ -287,7 +367,6 @@ func (r *WAVReader) Seek(sampleOffset int) error {
 		}
 	}
 
-	r.lastPos = sampleOffset
 	return nil
 }
 

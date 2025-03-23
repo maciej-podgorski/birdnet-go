@@ -13,13 +13,13 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
 	"github.com/tphakala/birdnet-go/internal/audio/buffer"
+	"github.com/tphakala/birdnet-go/internal/audio/file"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observation"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
 )
@@ -82,7 +82,6 @@ type PendingDetection struct {
 // ensuring thread safety when the map is accessed or modified by concurrent goroutines.
 var mutex sync.Mutex
 
-// func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, audioBuffers map[string]*myaudio.AudioBuffer, metrics *telemetry.Metrics) *Processor {
 func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, metrics *telemetry.Metrics, birdImageCache *imageprovider.BirdImageCache, bufferManager buffer.BufferManagerInterface) *Processor {
 	p := &Processor{
 		Settings:            settings,
@@ -133,7 +132,6 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 // Start goroutine to process detections from the queue
 func (p *Processor) startDetectionProcessor() {
 	go func() {
-		// ResultsQueue is fed by myaudio.ProcessData()
 		for item := range birdnet.ResultsQueue {
 			itemCopy := item
 			p.processDetections(&itemCopy)
@@ -327,7 +325,7 @@ func (p *Processor) generateClipName(scientificName string, confidence float32) 
 	month := currentTime.Format("01")
 
 	// Get the file extension from the export settings
-	fileType := myaudio.GetFileExtension(p.Settings.Realtime.Audio.Export.Type)
+	fileType := file.GetFileExtension(p.Settings.Realtime.Audio.Export.Type)
 
 	// Construct the clip name with the new pattern, including year and month subdirectories
 	// Use filepath.ToSlash to convert the path to a forward slash for web URLs

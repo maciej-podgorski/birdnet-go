@@ -20,7 +20,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/process"
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
+	"github.com/tphakala/birdnet-go/internal/audio/capture"
 )
 
 // SystemInfo represents basic system information
@@ -80,7 +80,7 @@ type DiskInfo struct {
 	IsReadOnly      bool    `json:"is_read_only"`                   // Whether the filesystem is mounted as read-only
 }
 
-// AudioDeviceInfo wraps the myaudio.AudioDeviceInfo struct for API responses
+// AudioDeviceInfo represents information about an audio device
 type AudioDeviceInfo struct {
 	Index int    `json:"index"`
 	Name  string `json:"name"`
@@ -484,11 +484,27 @@ func isReadOnlyMount(opts []string) bool {
 
 // GetAudioDevices handles GET /api/v2/system/audio/devices
 func (c *Controller) GetAudioDevices(ctx echo.Context) error {
-	// Get audio devices
-	devices, err := myaudio.ListAudioSources()
+	// Create a temporary audio context factory
+	captureFactory := capture.NewContextFactory(c.Settings.WebServer.Debug)
+	audioCtx, err := captureFactory.CreateAudioContext(nil)
+	if err != nil {
+		return c.HandleError(ctx, err, "Failed to create audio context", http.StatusInternalServerError)
+	}
+	defer audioCtx.Uninit()
+
+	// Create device manager to list devices
+	deviceManager := capture.NewDeviceManager(audioCtx, nil)
+	devices, err := deviceManager.ListDevices()
 	if err != nil {
 		return c.HandleError(ctx, err, "Failed to list audio devices", http.StatusInternalServerError)
 	}
+
+	// Close the device manager when done
+	defer func() {
+		if closeErr := deviceManager.Close(); closeErr != nil {
+			c.Debug("Warning: error closing device manager: %v", closeErr)
+		}
+	}()
 
 	// Check if no devices were found
 	if len(devices) == 0 {
@@ -500,7 +516,7 @@ func (c *Controller) GetAudioDevices(ctx echo.Context) error {
 	apiDevices := make([]AudioDeviceInfo, len(devices))
 	for i, device := range devices {
 		apiDevices[i] = AudioDeviceInfo{
-			Index: device.Index,
+			Index: i,
 			Name:  device.Name,
 			ID:    device.ID,
 		}
@@ -542,7 +558,34 @@ func (c *Controller) GetActiveAudioDevice(ctx echo.Context) error {
 	}
 
 	// Try to get additional device info and validate the device exists
-	devices, err := myaudio.ListAudioSources()
+	// Create a temporary audio context factory
+	captureFactory := capture.NewContextFactory(c.Settings.WebServer.Debug)
+	audioCtx, err := captureFactory.CreateAudioContext(nil)
+	if err != nil {
+		errorMsg := fmt.Sprintf("Failed to create audio context: %v", err)
+		c.Debug("%s", errorMsg)
+		diagnostics["error_details"] = errorMsg
+		return ctx.JSON(http.StatusOK, map[string]interface{}{
+			"device":      activeDevice,
+			"active":      true,
+			"verified":    false,
+			"message":     "Device configured but could not verify if it exists",
+			"diagnostics": diagnostics,
+		})
+	}
+	defer audioCtx.Uninit()
+
+	// Create device manager to list devices
+	deviceManager := capture.NewDeviceManager(audioCtx, nil)
+	devices, err := deviceManager.ListDevices()
+
+	// Close the device manager when done
+	defer func() {
+		if closeErr := deviceManager.Close(); closeErr != nil {
+			c.Debug("Warning: error closing device manager: %v", closeErr)
+		}
+	}()
+
 	if err != nil {
 		errorMsg := fmt.Sprintf("Failed to list audio devices: %v", err)
 		c.Debug("%s", errorMsg)

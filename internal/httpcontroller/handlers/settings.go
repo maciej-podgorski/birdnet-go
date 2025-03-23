@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/tphakala/birdnet-go/internal/audio"
+	"github.com/tphakala/birdnet-go/internal/audio/capture"
 	"github.com/tphakala/birdnet-go/internal/conf"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 // fieldsToSkip is a map of fields that should not be updated from the form
@@ -33,16 +34,34 @@ var fieldsToSkip = map[string]bool{
 // GetAudioDevices handles the request to list available audio devices
 // API: GET /api/v1/settings/audio/get
 func (h *Handlers) GetAudioDevices(c echo.Context) error {
-	devices, err := myaudio.ListAudioSources()
+	// Create a temporary device manager to list devices
+	captureFactory := capture.NewContextFactory(h.Settings.Debug)
+	audioCtx, err := captureFactory.CreateAudioContext(nil)
+	if err != nil {
+		log.Println("Error creating audio context:", err)
+		return h.NewHandlerError(err, "Failed to create audio context", http.StatusInternalServerError)
+	}
+	defer audioCtx.Uninit()
 
-	fmt.Println("Devices:", devices)
+	deviceManager := capture.NewDeviceManager(audioCtx, nil)
+	devices, err := deviceManager.ListDevices()
 
 	if err != nil {
 		log.Println("Error listing audio devices:", err)
 		return h.NewHandlerError(err, "Failed to list audio devices", http.StatusInternalServerError)
 	}
 
-	return c.JSON(http.StatusOK, devices)
+	// Convert from new DeviceInfo structure to format expected by API
+	var deviceList []map[string]interface{}
+	for i, device := range devices {
+		deviceList = append(deviceList, map[string]interface{}{
+			"index": i,
+			"name":  device.Name,
+			"id":    device.ID,
+		})
+	}
+
+	return c.JSON(http.StatusOK, deviceList)
 }
 
 // SaveSettings handles the request to save settings
@@ -126,12 +145,18 @@ func (h *Handlers) SaveSettings(c echo.Context) error {
 
 	// Check if audio equalizer settings have changed
 	if equalizerSettingsChanged(oldSettings.Realtime.Audio.Equalizer, settings.Realtime.Audio.Equalizer) {
-		if err := myaudio.UpdateFilterChain(settings); err != nil {
+		// Update equalizer settings
+		if err := audio.UpdateFilterChain(settings); err != nil {
+			log.Printf("Failed to update audio EQ filter chain: %v", err)
 			h.SSE.SendNotification(Notification{
-				Message: fmt.Sprintf("Error updating audio EQ filters: %v", err),
 				Type:    "error",
+				Message: "Failed to update audio equalizer settings.",
 			})
-			return h.NewHandlerError(err, "Failed to update audio EQ filters", http.StatusInternalServerError)
+		} else {
+			h.SSE.SendNotification(Notification{
+				Type:    "success",
+				Message: "Audio equalizer settings updated.",
+			})
 		}
 	}
 

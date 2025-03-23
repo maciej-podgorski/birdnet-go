@@ -15,13 +15,13 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
 	"github.com/tphakala/birdnet-go/internal/audio/buffer"
+	"github.com/tphakala/birdnet-go/internal/audio/file"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observation"
 )
 
@@ -220,12 +220,12 @@ func (a *SaveAudioAction) Execute(data interface{}) error {
 	}
 
 	if a.Settings.Realtime.Audio.Export.Type == "wav" {
-		if err := myaudio.SavePCMDataToWAV(outputPath, a.pcmData); err != nil {
+		if err := file.SavePCMDataToWAV(outputPath, a.pcmData); err != nil {
 			log.Printf("❌ error saving audio clip to WAV: %s\n", err)
 			return err
 		}
 	} else {
-		if err := myaudio.ExportAudioWithFFmpeg(a.pcmData, outputPath, &a.Settings.Realtime.Audio); err != nil {
+		if err := file.ExportAudioWithFFmpeg(a.pcmData, outputPath, &a.Settings.Realtime.Audio); err != nil {
 			log.Printf("❌ error exporting audio clip with FFmpeg: %s\n", err)
 			return err
 		}

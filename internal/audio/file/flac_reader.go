@@ -20,6 +20,11 @@ type FLACReader struct {
 	lastPos int // Position of the last read sample
 	isOpen  bool
 	debug   bool
+
+	// New fields for buffered reading
+	currentChunk []float32 // Buffer holding all current audio data
+	stepSamples  int       // How many samples to advance after each chunk
+	chunkSamples int       // Samples in a standard chunk (3 seconds)
 }
 
 // NewFLACReader creates a new FLAC file reader.
@@ -63,6 +68,9 @@ func (r *FLACReader) Open(filePath string) error {
 	r.lastPos = 0
 	r.isOpen = true
 
+	// Reset buffer state
+	r.currentChunk = nil
+
 	if r.debug {
 		fmt.Printf("FLAC Info: %+v\n", r.info)
 	}
@@ -73,6 +81,7 @@ func (r *FLACReader) Open(filePath string) error {
 // Close closes the file and releases resources.
 func (r *FLACReader) Close() error {
 	r.isOpen = false
+	r.currentChunk = nil
 	if r.file != nil {
 		return r.file.Close()
 	}
@@ -87,40 +96,38 @@ func (r *FLACReader) GetInfo() (Info, error) {
 	return r.info, nil
 }
 
-// ReadChunk reads the next chunk of audio data.
-func (r *FLACReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
-	if !r.isOpen {
-		return Chunk{}, errors.New("file not open")
+// fillBuffer reads more data into the buffer
+func (r *FLACReader) fillBuffer(minSamples int) error {
+	if r.debug {
+		fmt.Printf("DEBUG FLAC Reader: Filling buffer, need %d samples, have %d\n",
+			minSamples, len(r.currentChunk))
 	}
 
-	// Calculate number of samples in this chunk
-	chunkSamples := int(chunkDuration * float64(r.info.SampleRate))
-
-	if r.debug {
-		fmt.Printf("DEBUG FLAC Reader: Reading chunk of %d samples, current position %d, total samples %d\n",
-			chunkSamples, r.lastPos, r.info.TotalSamples)
+	// Only read as many as we need
+	samplesToRead := minSamples - len(r.currentChunk)
+	if samplesToRead <= 0 {
+		return nil
 	}
 
 	// Get the divisor for normalizing samples
 	divisor, err := getAudioDivisor(r.info.BitDepth)
 	if err != nil {
-		return Chunk{}, err
+		return err
 	}
 
-	floatData := make([]float32, 0, chunkSamples)
-	samplesRead := 0
+	samplesAdded := 0
 
 	// Read frames until we have enough samples or reach EOF
-	for samplesRead < chunkSamples {
+	for samplesAdded < samplesToRead {
 		frame, err := r.decoder.Next()
 		if errors.Is(err, io.EOF) {
 			if r.debug {
-				fmt.Printf("DEBUG FLAC Reader: Reached EOF at position %d of %d total samples (read %d samples for this chunk)\n",
-					r.lastPos+samplesRead, r.info.TotalSamples, samplesRead)
+				fmt.Printf("DEBUG FLAC Reader: Reached EOF while filling buffer at position %d, added %d samples\n",
+					r.lastPos+samplesAdded, samplesAdded)
 			}
-			break
+			return io.EOF
 		} else if err != nil {
-			return Chunk{}, fmt.Errorf("error reading FLAC frame: %w", err)
+			return fmt.Errorf("error reading FLAC frame: %w", err)
 		}
 
 		// Convert bytes to float32 samples
@@ -140,62 +147,134 @@ func (r *FLACReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, e
 				sample = int32(binary.LittleEndian.Uint32(frame[i:]))
 			}
 
-			floatData = append(floatData, float32(sample)/divisor)
-			samplesRead++
+			r.currentChunk = append(r.currentChunk, float32(sample)/divisor)
+			samplesAdded++
 
 			// If we have read enough samples, break
-			if samplesRead >= chunkSamples {
+			if samplesAdded >= samplesToRead {
 				break
 			}
 		}
 	}
 
-	// If we reached EOF and didn't get enough samples, pad with zeros
-	if samplesRead < chunkSamples {
-		if r.debug {
-			fmt.Printf("DEBUG FLAC Reader: Padding chunk with %d zeros (read %d of %d samples)\n",
-				chunkSamples-samplesRead, samplesRead, chunkSamples)
-		}
-		floatData = append(floatData, make([]float32, chunkSamples-samplesRead)...)
+	if r.debug {
+		fmt.Printf("DEBUG FLAC Reader: Added %d samples to buffer, total now %d\n",
+			samplesAdded, len(r.currentChunk))
 	}
 
-	// If we didn't read any samples, return EOF
-	if samplesRead == 0 {
-		if r.debug {
-			fmt.Printf("DEBUG FLAC Reader: No samples read, returning EOF at position %d of %d total samples\n",
-				r.lastPos, r.info.TotalSamples)
-		}
-		return Chunk{}, io.EOF
+	return nil
+}
+
+// ReadChunk reads the next chunk of audio data.
+func (r *FLACReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
+	if !r.isOpen {
+		return Chunk{}, errors.New("file not open")
 	}
+
+	// Initialize buffer on first call
+	if r.currentChunk == nil {
+		// Calculate key parameters
+		r.chunkSamples = int(chunkDuration * float64(r.info.SampleRate))
+		r.stepSamples = int((chunkDuration - overlap) * float64(r.info.SampleRate))
+
+		if r.debug {
+			fmt.Printf("DEBUG FLAC Reader: Initializing with chunk size %d samples, step %d samples\n",
+				r.chunkSamples, r.stepSamples)
+		}
+
+		// Create a large buffer (8 complete chunks worth like in the old code)
+		bufferSize := 8 * r.chunkSamples
+
+		// Fill initial buffer
+		if err := r.fillBuffer(bufferSize); err != nil && !errors.Is(err, io.EOF) {
+			return Chunk{}, err
+		}
+	}
+
+	// Check if we need more data
+	if len(r.currentChunk) < r.chunkSamples {
+		// Reached end of file
+		if r.lastPos >= r.info.TotalSamples {
+			if r.debug {
+				fmt.Printf("DEBUG FLAC Reader: Already at end of file, position %d >= total samples %d\n",
+					r.lastPos, r.info.TotalSamples)
+			}
+			return Chunk{}, io.EOF
+		}
+
+		// Try to read more data
+		if err := r.fillBuffer(r.chunkSamples * 4); err != nil && !errors.Is(err, io.EOF) {
+			return Chunk{}, err
+		}
+
+		// If we still don't have enough data, check if we have at least 1.5 seconds
+		// (matching the behavior in the old code)
+		minSamples := int(1.5 * float64(r.info.SampleRate))
+		if len(r.currentChunk) < minSamples {
+			if r.debug {
+				fmt.Printf("DEBUG FLAC Reader: Not enough samples at end of file, have %d, need %d\n",
+					len(r.currentChunk), minSamples)
+			}
+			return Chunk{}, io.EOF
+		}
+	}
+
+	// Prepare the chunk to return
+	var chunk Chunk
 
 	// Calculate start time relative to the beginning of the file
-	sampleOffset := r.lastPos
-	startTime := time.Duration(float64(sampleOffset) / float64(r.info.SampleRate) * float64(time.Second))
+	startTime := time.Duration(float64(r.lastPos) / float64(r.info.SampleRate) * float64(time.Second))
 
-	// Update the position for the next read
-	// Calculate step size in samples based on chunk duration and overlap in seconds
-	stepSamples := int((chunkDuration - overlap) * float64(r.info.SampleRate))
-	r.lastPos += stepSamples
-
-	if r.debug {
-		fmt.Printf("DEBUG FLAC Reader: Advanced position by %d samples to %d, overlap %.2f seconds\n",
-			stepSamples, r.lastPos, overlap)
-	}
-
-	// Check if next position would be beyond the file
-	if r.lastPos >= r.info.TotalSamples {
+	// Handle the case where we have some data but not a full chunk
+	dataLen := len(r.currentChunk)
+	if dataLen < r.chunkSamples {
+		// Pad with zeros if we don't have a full chunk
 		if r.debug {
-			fmt.Printf("DEBUG FLAC Reader: Next position %d would exceed total samples %d\n",
-				r.lastPos, r.info.TotalSamples)
+			fmt.Printf("DEBUG FLAC Reader: Padding chunk with %d zeros (have %d of %d samples)\n",
+				r.chunkSamples-dataLen, dataLen, r.chunkSamples)
+		}
+
+		paddedData := make([]float32, r.chunkSamples)
+		copy(paddedData, r.currentChunk)
+
+		chunk = Chunk{
+			Data:         paddedData,
+			StartTime:    time.Time{}.Add(startTime),
+			SampleOffset: r.lastPos,
+			NumSamples:   dataLen,
+		}
+
+		// Advance position and clear buffer since we're at EOF
+		r.lastPos += r.stepSamples
+		r.currentChunk = nil
+	} else {
+		// Normal case - return full chunk and advance window
+		chunk = Chunk{
+			Data:         r.currentChunk[:r.chunkSamples],
+			StartTime:    time.Time{}.Add(startTime),
+			SampleOffset: r.lastPos,
+			NumSamples:   r.chunkSamples,
+		}
+
+		// Advance our sliding window
+		r.lastPos += r.stepSamples
+
+		// Slide the window forward
+		if r.stepSamples >= len(r.currentChunk) {
+			// Step is larger than our buffer, just clear it
+			r.currentChunk = nil
+		} else {
+			// Normal sliding window
+			r.currentChunk = r.currentChunk[r.stepSamples:]
 		}
 	}
 
-	return Chunk{
-		Data:         floatData,
-		StartTime:    time.Time{}.Add(startTime), // Using zero time as base
-		SampleOffset: sampleOffset,
-		NumSamples:   samplesRead,
-	}, nil
+	if r.debug {
+		fmt.Printf("DEBUG FLAC Reader: Returned chunk from position %d, advanced to %d\n",
+			chunk.SampleOffset, r.lastPos)
+	}
+
+	return chunk, nil
 }
 
 // ProcessFile processes the entire file in chunks.
@@ -204,8 +283,15 @@ func (r *FLACReader) ProcessFile(ctx context.Context, chunkDuration float64, ove
 		return errors.New("file not open")
 	}
 
-	// Seek to the beginning of the file
-	if err := r.Seek(0); err != nil {
+	// Reset any existing buffer and position
+	r.currentChunk = nil
+	r.lastPos = 0
+
+	// Reopen the file to reset the decoder state
+	filePath := r.info.Path
+	r.Close()
+
+	if err := r.Open(filePath); err != nil {
 		return err
 	}
 
@@ -217,6 +303,9 @@ func (r *FLACReader) ProcessFile(ctx context.Context, chunkDuration float64, ove
 			// Read next chunk
 			chunk, err := r.ReadChunk(chunkDuration, overlap)
 			if errors.Is(err, io.EOF) {
+				if r.debug {
+					fmt.Println("DEBUG FLAC Reader: Reached EOF, processing complete")
+				}
 				return nil // Reached end of file, processing complete
 			}
 			if err != nil {
@@ -237,7 +326,11 @@ func (r *FLACReader) Seek(sampleOffset int) error {
 		return errors.New("file not open")
 	}
 
-	// FLAC decoder doesn't have a direct seek method, so we need to reopen the file
+	// Reset our buffer and position
+	r.currentChunk = nil
+	r.lastPos = sampleOffset
+
+	// Reopen the file to reset the decoder state
 	filePath := r.info.Path
 	r.Close()
 
@@ -246,7 +339,7 @@ func (r *FLACReader) Seek(sampleOffset int) error {
 	}
 
 	// For FLAC, we'll need to read and discard frames until we reach our position
-	// This is inefficient but works as a basic implementation
+	// This is inefficient but only happens on explicit seeks
 	if sampleOffset > 0 {
 		samplesRemaining := sampleOffset
 
@@ -259,8 +352,9 @@ func (r *FLACReader) Seek(sampleOffset int) error {
 				return fmt.Errorf("error seeking: %w", err)
 			}
 
-			// Each frame has frameSampleSize samples per channel
+			// Calculate how many samples are in this frame
 			frameSamples := len(frame) / (r.decoder.BitsPerSample / 8) / r.decoder.NChannels
+
 			if frameSamples >= samplesRemaining {
 				break
 			}
@@ -268,7 +362,6 @@ func (r *FLACReader) Seek(sampleOffset int) error {
 		}
 	}
 
-	r.lastPos = sampleOffset
 	return nil
 }
 
