@@ -46,7 +46,7 @@ func TestBufferFactory_CreateAnalysisBuffer(t *testing.T) {
 	)
 
 	// Execute the method
-	buffer := factory.CreateAnalysisBuffer(48000, 2, 3*time.Second)
+	buffer := factory.CreateAnalysisBuffer(48000, 1, 3*time.Second)
 
 	// Assert results
 	assert.NotNil(t, buffer)
@@ -55,7 +55,7 @@ func TestBufferFactory_CreateAnalysisBuffer(t *testing.T) {
 	analysisBuffer, ok := buffer.(*AnalysisBuffer)
 	if assert.True(t, ok, "Should be *AnalysisBuffer type") {
 		assert.Equal(t, uint32(48000), analysisBuffer.sampleRate)
-		assert.Equal(t, uint32(2), analysisBuffer.channels)
+		assert.Equal(t, uint32(1), analysisBuffer.channels)
 		assert.Equal(t, mockRingBuffer, analysisBuffer.buffer)
 		assert.Equal(t, mockLogger, analysisBuffer.logger)
 		assert.Equal(t, mockTimeProvider, analysisBuffer.timeProvider)

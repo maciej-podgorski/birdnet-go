@@ -14,14 +14,17 @@ This package is part of the larger [audio system](../README.md) which provides c
   - Provides fundamental read/write operations
   - Handles buffer reset functionality
   - Maintains sample rate and channel information
+  - **Important**: Designed for single audio channel per buffer
 
 - **AnalysisBufferInterface**: Interface for analysis-specific buffer operations
   - Extends AudioBuffer with analysis-specific functionality
   - Provides methods for checking analysis readiness
+  - **Note**: Each buffer handles exactly one audio channel
 
 - **CaptureBufferInterface**: Interface for capture-specific buffer operations
   - Extends AudioBuffer with capture-specific functionality
   - Enables extraction of time-based audio segments
+  - **Note**: Each buffer handles exactly one audio channel
 
 - **BufferManagerInterface**: Interface for buffer management operations
   - Defines methods for buffer allocation and deallocation
@@ -185,6 +188,7 @@ The package follows Go error handling best practices:
 - No platform-specific code in the buffer implementation
 - Platform-independent time management through TimeProvider abstraction
 - Consistent byte order handling for audio data
+- **Important**: Each buffer is designed to handle a single audio channel; for multi-channel audio (stereo), use separate buffers
 - Optimized for cross-platform performance
 - Comprehensive test suite ensuring consistent behavior across platforms
 
@@ -197,12 +201,14 @@ The package follows Go error handling best practices:
 
 ### Analysis Buffer
 - Optimized for the BirdNET sliding window algorithm
+- **Important**: Designed for single audio channel per buffer; do not store multi-channel (e.g., stereo) audio in a single buffer
 - Default overlap is 0.25 (25%) but configurable via SetOverlapFraction
 - Implements retry logic for write operations during buffer congestion
 - Warning system to detect and report buffer overflow conditions
 - Threshold-based readiness detection for efficient polling
 
 ### Capture Buffer
+- **Important**: Designed for single audio channel per buffer; do not store multi-channel (e.g., stereo) audio in a single buffer
 - Circular buffer with timestamp tracking for precise audio segment retrieval
 - Adjusts timestamps when buffer wraps around to maintain time accuracy
 - Aligns buffer size to optimize memory access patterns (2KB boundaries)
