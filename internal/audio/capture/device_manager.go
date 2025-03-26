@@ -45,6 +45,13 @@ type deviceState struct {
 	restartAttempts int
 }
 
+// captureDeviceInfo holds detailed device information for capture initialization.
+type captureDeviceInfo struct {
+	Name    string
+	ID      string
+	Pointer any
+}
+
 // NewDeviceManager creates a new device manager.
 func NewDeviceManager(context audio.AudioContext, bufferManager audio.BufferManager) *DeviceManager {
 	return &DeviceManager{
@@ -529,11 +536,4 @@ func (m *DeviceManager) GetPlatformSpecificDevices() ([]audio.DeviceInfo, error)
 	}
 
 	return filteredDevices, nil
-}
-
-// captureDeviceInfo holds detailed device information for capture initialization.
-type captureDeviceInfo struct {
-	Name    string
-	ID      string
-	Pointer interface{}
 }

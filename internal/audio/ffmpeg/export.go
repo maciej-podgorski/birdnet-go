@@ -73,7 +73,7 @@ func Export(ctx context.Context, data []byte, opts *ExportOptions) error {
 	builder.WithOutputBitrate(bitrate)
 
 	// Start the FFmpeg process
-	process, err := Start(ctx, ProcessOptions{
+	process, err := Start(ctx, &ProcessOptions{
 		FFmpegPath: opts.FFmpegPath,
 		Args:       builder.Build(),
 		InputData:  data,

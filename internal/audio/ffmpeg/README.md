@@ -308,6 +308,326 @@ The package is highly configurable:
 4. Command building provides flexibility for different streaming scenarios
 5. Inactivity timeout for streams is configurable
 
+## API Reference
+
+### Types
+
+#### Process Management
+
+**`Process`** (`process.go`): Represents an FFmpeg process
+- Fields:
+  - `cmd`: Commander interface for executing commands
+  - `stdout`, `stderr`, `stdin`: I/O pipes for the process
+  - `stderrBuf`: Buffer to collect stderr output
+  - Other internal fields for concurrency management
+
+**`ProcessOptions`** (`process.go`): Options for starting an FFmpeg process
+- Fields:
+  - `FFmpegPath`: Path to the FFmpeg executable
+  - `Args`: Command-line arguments for FFmpeg
+  - `InputData`: Optional data to write to stdin
+  - `Executor`: Optional custom command executor
+
+**`ProcessError`** (`process.go`): Error with FFmpeg stderr output
+- Fields:
+  - `Err`: The underlying error
+  - `Stderr`: The captured stderr output
+
+**`RestartInfo`** (`process.go`): Tracks information about process restarts
+- Fields:
+  - `count`: Number of restart attempts
+  - `lastTime`: Timestamp of the last restart attempt
+
+**`BoundedBuffer`** (`process.go`): Thread-safe buffer with size limits
+- Methods:
+  - `Write(p []byte) (n int, err error)`: Implements io.Writer
+  - `String() string`: Returns buffer contents as string
+  - `Reset()`: Clears the buffer
+
+#### Command Building
+
+**`StreamFormat`** (`command.go`): Defines audio format parameters
+- Fields:
+  - `SampleRate`: Sample rate in Hz (e.g., 44100, 48000)
+  - `Channels`: Number of audio channels
+  - `BitDepth`: Bit depth (e.g., 16, 24, 32)
+
+**`StreamProtocol`** (`command.go`): Enum for stream protocols
+- Values:
+  - `ProtocolTCP`: TCP transport
+  - `ProtocolUDP`: UDP transport
+  - `ProtocolHTTP`: HTTP transport
+  - `ProtocolHLS`: HLS streaming
+
+**`StreamSource`** (`command.go`): Defines a stream source
+- Fields:
+  - `URL`: The stream URL
+  - `Protocol`: The transport protocol
+
+**`CommandBuilder`** (`command.go`): Fluent interface for building FFmpeg commands
+- Fields:
+  - Internal fields for building command arguments
+
+#### Export
+
+**`ExportFormat`** (`export.go`): Format settings for audio export
+- Fields:
+  - `Type`: Format type (e.g., "mp3", "flac", "aac")
+  - `Bitrate`: Bitrate setting (e.g., "192k")
+
+**`ExportOptions`** (`export.go`): Options for audio export
+- Fields:
+  - `FFmpegPath`: Path to FFmpeg executable
+  - `Format`: The export format
+  - `StreamFormat`: The audio format
+  - `OutputPath`: Path to the output file
+  - `Timeout`: Maximum time to wait for export
+
+#### Process Monitoring
+
+**`ProcessInfo`** (`monitor.go`): Information about a system process
+- Fields:
+  - `PID`: Process ID
+  - `Name`: Process name
+
+**`ProcessTracker`** (`monitor.go`): Interface for tracking FFmpeg processes
+- Methods:
+  - `RegisterProcess(url string, process *Process)`: Registers a process
+  - `UnregisterProcess(url string)`: Removes a process registration
+  - `GetProcess(url string) (*Process, bool)`: Gets a process by URL
+  - `ListProcesses() map[string]*Process`: Lists all processes
+
+**`DefaultProcessTracker`** (`monitor.go`): Implementation of `ProcessTracker`
+- Fields:
+  - `processes`: Thread-safe map of processes
+
+**`SystemProcessFinder`** (`monitor.go`): Interface for finding and managing system processes
+- Methods:
+  - `FindFFmpegProcesses() ([]ProcessInfo, error)`: Finds FFmpeg processes
+  - `IsProcessRunning(pid int) bool`: Checks if a process is running
+  - `TerminateProcess(pid int) error`: Terminates a process
+
+**`DefaultSystemProcessFinder`** (`monitor.go`): Implementation of `SystemProcessFinder`
+
+**`Monitor`** (`monitor.go`): Monitors and manages FFmpeg processes
+- Fields:
+  - Internal fields for tracking processes and configuration
+
+**`MonitorOptions`** (`monitor.go`): Options for creating a monitor
+- Fields:
+  - `Interval`: Monitoring interval
+  - `ProcessFinder`: Process finder implementation
+  - `ProcessTracker`: Process tracker implementation
+
+#### Command Execution
+
+**`CommandExecutor`** (`executor.go`): Interface for creating commands
+- Methods:
+  - `Command(name string, args ...string) Commander`: Creates a command
+
+**`Commander`** (`executor.go`): Interface abstracting exec.Cmd functionality
+- Methods:
+  - `Start() error`: Starts the command
+  - `Wait() error`: Waits for command completion
+  - `StdoutPipe() (io.ReadCloser, error)`: Gets stdout pipe
+  - `StderrPipe() (io.ReadCloser, error)`: Gets stderr pipe
+  - `StdinPipe() (io.WriteCloser, error)`: Gets stdin pipe
+  - `SetSysProcAttr(attr *syscall.SysProcAttr)`: Sets process attributes
+  - `Process() *os.Process`: Gets the underlying process
+
+**`DefaultCommandExecutor`** (`executor.go`): Standard implementation of `CommandExecutor`
+
+**`DefaultCommander`** (`executor.go`): Implementation of `Commander` wrapping exec.Cmd
+
+### Functions
+
+#### Process Management
+
+**`NewBoundedBuffer(size int) *BoundedBuffer`** (`process.go`): Creates a new bounded buffer
+- Arguments:
+  - `size`: The maximum size of the buffer
+- Returns:
+  - A new bounded buffer instance
+
+**`Start(ctx context.Context, opts *ProcessOptions) (*Process, error)`** (`process.go`): Starts a new FFmpeg process
+- Arguments:
+  - `ctx`: Context for cancellation
+  - `opts`: Process options
+- Returns:
+  - The process instance and any error
+
+**Platform-specific functions**:
+- `setupProcessGroup(cmd Commander)` (`platform_unix.go`/`platform_windows.go`): Sets up process group (platform-specific)
+- `killProcessGroup(cmd Commander) error` (`platform_unix.go`/`platform_windows.go`): Kills process group (platform-specific)
+
+#### Process Methods
+
+**`StdoutReader() io.Reader`** (`process.go`): Returns a reader for stdout
+
+**`StderrOutput() string`** (`process.go`): Returns captured stderr output
+
+**`Stop() error`** (`process.go`): Stops the FFmpeg process
+
+**`collectStderr()`** (`process.go`): Reads stderr output and stores it in buffer
+
+**`updateRestartInfo()`** (`process.go`): Updates process restart tracking information
+
+**`getRestartDelay() time.Duration`** (`process.go`): Calculates delay for next restart attempt
+
+#### Command Building
+
+**`NewCommandBuilder(ffmpegPath string) *CommandBuilder`** (`command.go`): Creates a new command builder
+- Arguments:
+  - `ffmpegPath`: Path to FFmpeg executable
+- Returns:
+  - New CommandBuilder instance
+
+**`getFormatForBitDepth(bitDepth int) string`** (`command.go`): Returns FFmpeg format for bit depth
+- Arguments:
+  - `bitDepth`: Bit depth value (16, 24, 32)
+- Returns:
+  - FFmpeg format string (e.g., "s16le")
+
+**`containsOption(args []string, option string) bool`** (`command.go`): Checks if an option exists in arguments
+- Arguments:
+  - `args`: Argument list
+  - `option`: Option to check for
+- Returns:
+  - Whether option exists
+
+#### CommandBuilder Methods
+
+**`WithFormat(format StreamFormat) *CommandBuilder`** (`command.go`): Sets audio format
+
+**`WithInputURL(source StreamSource) *CommandBuilder`** (`command.go`): Sets input URL
+
+**`WithInputFile(filePath string) *CommandBuilder`** (`command.go`): Sets input file
+
+**`WithInputPipe() *CommandBuilder`** (`command.go`): Configures input from stdin
+
+**`WithOutputPipe() *CommandBuilder`** (`command.go`): Configures output to stdout
+
+**`WithOutputFile(filePath string) *CommandBuilder`** (`command.go`): Sets output file
+
+**`WithOutputFormat(format string) *CommandBuilder`** (`command.go`): Sets output format
+
+**`WithOutputCodec(codec string) *CommandBuilder`** (`command.go`): Sets output audio codec
+
+**`WithOutputBitrate(bitrate string) *CommandBuilder`** (`command.go`): Sets output bitrate
+
+**`WithCustomOption(name, value string) *CommandBuilder`** (`command.go`): Adds custom option
+
+**`DisableVideo() *CommandBuilder`** (`command.go`): Disables video processing
+
+**`Build() []string`** (`command.go`): Builds complete command arguments
+
+**`BuildCommand() string`** (`command.go`): Returns command as a string (for debugging)
+
+#### Export
+
+**`Export(ctx context.Context, data []byte, opts *ExportOptions) error`** (`export.go`): Exports PCM data to file
+- Arguments:
+  - `ctx`: Context for cancellation
+  - `data`: PCM audio data
+  - `opts`: Export options
+- Returns:
+  - Error if export fails
+
+**`getEncoder(format string) string`** (`export.go`): Gets appropriate codec based on format
+- Arguments:
+  - `format`: Format type (e.g., "mp3", "flac")
+- Returns:
+  - Codec name (e.g., "libmp3lame")
+
+**`getOutputFormat(format string) string`** (`export.go`): Gets container format for codec
+- Arguments:
+  - `format`: Format type
+- Returns:
+  - Container format (e.g., "mp3", "flac", "mp4")
+
+**`getLimitedBitrate(format, requestedBitrate string) string`** (`export.go`): Limits bitrate based on format
+- Arguments:
+  - `format`: Format type
+  - `requestedBitrate`: Requested bitrate
+- Returns:
+  - Valid bitrate for format
+
+#### Process Monitoring
+
+**`NewProcessTracker() *DefaultProcessTracker`** (`monitor.go`): Creates a new process tracker
+
+**`IsWindows() bool`** (`monitor.go`): Returns true if running on Windows
+
+**`NewMonitor(opts MonitorOptions) *Monitor`** (`monitor.go`): Creates a new FFmpeg process monitor
+- Arguments:
+  - `opts`: Monitor options
+- Returns:
+  - New Monitor instance
+
+#### ProcessTracker Methods
+
+**`RegisterProcess(url string, process *Process)`** (`monitor.go`): Registers a process
+
+**`UnregisterProcess(url string)`** (`monitor.go`): Removes a process registration
+
+**`GetProcess(url string) (*Process, bool)`** (`monitor.go`): Gets a process by URL
+
+**`ListProcesses() map[string]*Process`** (`monitor.go`): Lists all registered processes
+
+#### SystemProcessFinder Methods
+
+**`FindFFmpegProcesses() ([]ProcessInfo, error)`** (`monitor.go`): Finds all FFmpeg processes
+
+**`IsProcessRunning(pid int) bool`** (`monitor.go`): Checks if a process is running
+
+**`TerminateProcess(pid int) error`** (`monitor.go`): Terminates a process
+
+**Platform-specific methods**:
+- `findFFmpegProcessesUnix() ([]ProcessInfo, error)` (`monitor.go`): Finds processes on Unix
+- `findFFmpegProcessesWindows() ([]ProcessInfo, error)` (`monitor.go`): Finds processes on Windows
+- `isProcessRunningUnix(pid int) bool` (`monitor.go`): Checks process on Unix
+- `isProcessRunningWindows(pid int) bool` (`monitor.go`): Checks process on Windows
+- `terminateProcessUnix(pid int) error` (`monitor.go`): Terminates process on Unix
+- `terminateProcessWindows(pid int) error` (`monitor.go`): Terminates process on Windows
+
+#### Monitor Methods
+
+**`Start()`** (`monitor.go`): Starts the monitor
+
+**`Stop()`** (`monitor.go`): Stops the monitor
+
+**`IsRunning() bool`** (`monitor.go`): Checks if monitor is running
+
+**`UpdateURLs(urls []string)`** (`monitor.go`): Updates URLs to monitor
+
+**`RegisterProcess(url string, process *Process)`** (`monitor.go`): Registers a process
+
+**`UnregisterProcess(url string)`** (`monitor.go`): Unregisters a process
+
+**`monitorLoop()`** (`monitor.go`): Main monitoring loop
+
+**`checkProcesses() error`** (`monitor.go`): Checks registered processes
+
+**`checkOrphanedSystemProcesses() error`** (`monitor.go`): Finds and cleans orphaned processes
+
+#### Command Execution Methods
+
+**`Command(name string, args ...string) Commander`** (`executor.go`): Creates a command
+
+**`Start() error`** (`executor.go`): Starts the command
+
+**`Wait() error`** (`executor.go`): Waits for completion
+
+**`StdoutPipe() (io.ReadCloser, error)`** (`executor.go`): Gets stdout pipe
+
+**`StderrPipe() (io.ReadCloser, error)`** (`executor.go`): Gets stderr pipe
+
+**`StdinPipe() (io.WriteCloser, error)`** (`executor.go`): Gets stdin pipe
+
+**`SetSysProcAttr(attr *syscall.SysProcAttr)`** (`executor.go`): Sets process attributes
+
+**`Process() *os.Process`** (`executor.go`): Gets process info
+
 ## Related Packages
 
 For a higher-level integration that combines this package with the stream manager, see the [FFmpegStream Package](../ffmpegstream/README.md), which provides a complete solution for streaming audio with FFmpeg.

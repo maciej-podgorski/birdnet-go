@@ -485,6 +485,385 @@ The package follows Go error handling best practices:
 - Graceful degradation under memory pressure
 - Explicit cleanup methods to prevent resource leaks
 
+## API Reference
+
+### Types
+
+#### Core Interfaces
+
+**`AudioBuffer`** (`interfaces.go`): Base interface for all buffer types
+- Methods:
+  - `Write(data []byte) (int, error)`: Writes audio data to the buffer
+  - `Read(p []byte) (int, error)`: Reads audio data from the buffer
+  - `Reset() error`: Resets the buffer to its initial state
+  - `SampleRate() uint32`: Returns the buffer's sample rate in Hz
+  - `Channels() uint32`: Returns the number of audio channels
+
+**`AnalysisBufferInterface`** (`interfaces.go`): Interface for analysis-specific buffer operations
+- Extends `AudioBuffer` interface
+- Methods:
+  - `ReadyForAnalysis() bool`: Checks if enough data is available for analysis
+
+**`CaptureBufferInterface`** (`interfaces.go`): Interface for capture-specific buffer operations
+- Extends `AudioBuffer` interface
+- Methods:
+  - `ReadSegment(startTime time.Time, durationSeconds int) ([]byte, error)`: Extracts a time-based audio segment
+
+**`BufferManagerInterface`** (`interfaces.go`): Interface for buffer management operations
+- Methods:
+  - `AllocateAnalysisBuffer(capacity int, source string) error`: Allocates an analysis buffer for a source
+  - `RemoveAnalysisBuffer(source string) error`: Removes an analysis buffer for a source
+  - `AllocateCaptureBuffer(durationSeconds, sampleRate, bytesPerSample int, source string) error`: Allocates a capture buffer
+  - `RemoveCaptureBuffer(source string) error`: Removes a capture buffer for a source
+  - `WriteToAnalysisBuffer(stream string, data []byte) error`: Writes data to an analysis buffer
+  - `ReadFromAnalysisBuffer(stream string, config *BufferConfig) ([]byte, error)`: Reads data from an analysis buffer
+  - `WriteToCaptureBuffer(source string, data []byte) error`: Writes data to a capture buffer
+  - `ReadSegmentFromCaptureBuffer(source string, startTime time.Time, duration int) ([]byte, error)`: Reads a segment from a capture buffer
+  - `CleanupAllBuffers()`: Cleans up all buffers
+  - `HasAnalysisBuffer(source string) bool`: Checks if an analysis buffer exists for a source
+  - `HasCaptureBuffer(source string) bool`: Checks if a capture buffer exists for a source
+
+**`RingBufferInterface`** (`interfaces.go`): Interface for ring buffer operations
+- Methods:
+  - `Write(p []byte) (n int, err error)`: Writes data to the ring buffer
+  - `Read(p []byte) (n int, err error)`: Reads data from the ring buffer
+  - `Length() int`: Returns the number of bytes in the buffer
+  - `Capacity() int`: Returns the total capacity of the buffer
+  - `Free() int`: Returns the number of free bytes in the buffer
+  - `Reset()`: Resets the buffer
+
+**`BufferFactoryInterface`** (`interfaces.go`): Interface for buffer factory operations
+- Methods:
+  - `CreateAnalysisBuffer(sampleRate, channels uint32, duration time.Duration) AnalysisBufferInterface`: Creates an analysis buffer
+  - `CreateCaptureBuffer(sampleRate, channels uint32, duration time.Duration) CaptureBufferInterface`: Creates a capture buffer
+  - `CreateBufferManager() BufferManagerInterface`: Creates a buffer manager
+
+#### Implementation Classes
+
+**`AnalysisBuffer`** (`analysis.go`): Implementation of `AnalysisBufferInterface`
+- Fields:
+  - `buffer`: The underlying ring buffer
+  - `prevData`: Previous data for sliding window
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `threshold`: Analysis readiness threshold
+  - `overlapFraction`: Overlap fraction for sliding window
+  - `warningCounter`: Counter for buffer-full warnings
+  - `mu`: Mutex for thread safety
+  - `logger`: Logger interface
+  - `timeProvider`: Time provider interface
+
+**`CaptureBuffer`** (`capture.go`): Implementation of `CaptureBufferInterface`
+- Fields:
+  - `data`: The underlying byte array
+  - `writeIndex`: Current write position
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `bytesPerSample`: Bytes per audio sample
+  - `bufferSize`: Total buffer size in bytes
+  - `bufferDuration`: Duration of the buffer
+  - `startTime`: Buffer start time
+  - `initialized`: Whether buffer is initialized
+  - `mu`: Mutex for thread safety
+  - `logger`: Logger interface
+  - `timeProvider`: Time provider interface
+
+**`BufferManager`** (`buffer_manager.go`): Implementation of `BufferManagerInterface`
+- Fields:
+  - `analysisBuffers`: Map of analysis buffers by source ID
+  - `analysisMutex`: Mutex for analysis buffers
+  - `captureBuffers`: Map of capture buffers by source ID
+  - `captureMutex`: Mutex for capture buffers
+  - `logger`: Logger interface
+  - `timeProvider`: Time provider interface
+  - `config`: Buffer configuration
+  - `bufferFactory`: Buffer factory interface
+
+**`BufferFactory`** (`buffer_factory.go`): Implementation of `BufferFactoryInterface`
+- Fields:
+  - `logger`: Logger interface
+  - `timeProvider`: Time provider interface
+  - `config`: Buffer configuration
+  - `ringBufferFactory`: Factory function for ring buffers
+
+**`BufferConfig`** (`buffer_config.go`): Configuration for buffer operations
+- Fields:
+  - `BirdNETOverlap`: Overlap fraction for BirdNET
+  - `SampleRate`: Default sample rate
+  - `BitDepth`: Default bit depth
+  - `BufferSize`: Default buffer size
+  - `DefaultAnalysisDuration`: Default duration for analysis buffers
+  - `DefaultCaptureDuration`: Default duration for capture buffers
+
+#### Dependencies
+
+**`TimeProvider`** (`dependencies.go`): Interface for time-related operations
+- Methods:
+  - `Now() time.Time`: Returns the current time
+  - `Sleep(duration time.Duration)`: Sleeps for the specified duration
+
+**`RealTimeProvider`** (`dependencies.go`): Default implementation of `TimeProvider`
+- Methods:
+  - `Now() time.Time`: Returns the current system time
+  - `Sleep(duration time.Duration)`: Sleeps using system time
+
+**`Logger`** (`dependencies.go`): Interface for logging operations
+- Methods:
+  - `Debug(msg string, args ...interface{})`: Logs a debug message
+  - `Info(msg string, args ...interface{})`: Logs an info message
+  - `Warn(msg string, args ...interface{})`: Logs a warning message
+  - `Error(msg string, args ...interface{})`: Logs an error message
+
+**`StandardLogger`** (`dependencies.go`): Default implementation of `Logger`
+- Methods:
+  - `Debug(msg string, args ...interface{})`: Logs a debug message
+  - `Info(msg string, args ...interface{})`: Logs an info message
+  - `Warn(msg string, args ...interface{})`: Logs a warning message
+  - `Error(msg string, args ...interface{})`: Logs an error message
+
+### Functions
+
+#### Analysis Buffer
+
+**`NewAnalysisBuffer(sampleRate, channels uint32, duration time.Duration) *AnalysisBuffer`** (`analysis.go`): Creates a new analysis buffer with default dependencies
+- Arguments:
+  - `sampleRate`: Sample rate in Hz (e.g., 44100, 48000)
+  - `channels`: Number of audio channels
+  - `duration`: Duration of the buffer
+- Returns:
+  - A new analysis buffer
+
+**`NewAnalysisBufferWithDeps(sampleRate, channels uint32, duration time.Duration, ringBufferFactory func(size int) RingBufferInterface, logger Logger, timeProvider TimeProvider) *AnalysisBuffer`** (`analysis.go`): Creates a new analysis buffer with custom dependencies
+- Arguments:
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `duration`: Duration of the buffer
+  - `ringBufferFactory`: Factory function for ring buffers
+  - `logger`: Logger implementation
+  - `timeProvider`: Time provider implementation
+- Returns:
+  - A new analysis buffer with custom dependencies
+
+#### AnalysisBuffer Methods
+
+**`Write(data []byte) (int, error)`** (`analysis.go`): Writes audio data to the buffer
+- Arguments:
+  - `data`: Audio data to write
+- Returns:
+  - Number of bytes written and any error
+
+**`Read(p []byte) (int, error)`** (`analysis.go`): Reads audio data from the buffer with sliding window approach
+- Arguments:
+  - `p`: Buffer to read into
+- Returns:
+  - Number of bytes read and any error
+
+**`ReadyForAnalysis() bool`** (`analysis.go`): Checks if buffer has enough data for analysis
+- Returns:
+  - Whether the buffer is ready for analysis
+
+**`Reset() error`** (`analysis.go`): Resets the buffer to its initial state
+- Returns:
+  - Any error that occurred
+
+**`SampleRate() uint32`** (`analysis.go`): Returns the buffer's sample rate
+- Returns:
+  - Sample rate in Hz
+
+**`Channels() uint32`** (`analysis.go`): Returns the number of audio channels
+- Returns:
+  - Number of audio channels
+
+**`SetOverlapFraction(fraction float64)`** (`analysis.go`): Sets the overlap fraction for sliding window
+- Arguments:
+  - `fraction`: Overlap fraction (0.0-1.0)
+
+#### Capture Buffer
+
+**`NewCaptureBuffer(sampleRate, channels uint32, duration time.Duration) *CaptureBuffer`** (`capture.go`): Creates a new capture buffer with default dependencies
+- Arguments:
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `duration`: Duration of the buffer
+- Returns:
+  - A new capture buffer
+
+**`NewCaptureBufferWithDeps(sampleRate, channels uint32, duration time.Duration, logger Logger, timeProvider TimeProvider) *CaptureBuffer`** (`capture.go`): Creates a new capture buffer with custom dependencies
+- Arguments:
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `duration`: Duration of the buffer
+  - `logger`: Logger implementation
+  - `timeProvider`: Time provider implementation
+- Returns:
+  - A new capture buffer with custom dependencies
+
+#### CaptureBuffer Methods
+
+**`Write(data []byte) (bytesWritten int, err error)`** (`capture.go`): Adds PCM audio data to the buffer
+- Arguments:
+  - `data`: Audio data to write
+- Returns:
+  - Number of bytes written and any error
+
+**`Read(p []byte) (bytesRead int, err error)`** (`capture.go`): Reads audio data from the buffer
+- Arguments:
+  - `p`: Buffer to read into
+- Returns:
+  - Number of bytes read and any error
+
+**`ReadSegment(requestedStartTime time.Time, durationSeconds int) (segment []byte, err error)`** (`capture.go`): Extracts a segment of audio data based on start time and duration
+- Arguments:
+  - `requestedStartTime`: Segment start time
+  - `durationSeconds`: Segment duration in seconds
+- Returns:
+  - Audio segment and any error
+
+**`Reset() error`** (`capture.go`): Resets the buffer to its initial state
+- Returns:
+  - Any error that occurred
+
+**`SampleRate() uint32`** (`capture.go`): Returns the buffer's sample rate
+- Returns:
+  - Sample rate in Hz
+
+**`Channels() uint32`** (`capture.go`): Returns the number of audio channels
+- Returns:
+  - Number of audio channels
+
+#### Buffer Manager
+
+**`NewBufferManager() *BufferManager`** (`buffer_manager.go`): Creates a new buffer manager with default dependencies
+- Returns:
+  - A new buffer manager
+
+**`NewBufferManagerWithDeps(logger Logger, timeProvider TimeProvider, config *BufferConfig, bufferFactory BufferFactoryInterface) *BufferManager`** (`buffer_manager.go`): Creates a new buffer manager with custom dependencies
+- Arguments:
+  - `logger`: Logger implementation
+  - `timeProvider`: Time provider implementation
+  - `config`: Buffer configuration
+  - `bufferFactory`: Buffer factory interface
+- Returns:
+  - A new buffer manager with custom dependencies
+
+#### BufferManager Methods
+
+**`AllocateAnalysisBuffer(capacity int, source string) error`** (`buffer_manager.go`): Initializes a ring buffer for a single audio source
+- Arguments:
+  - `capacity`: Buffer capacity in bytes
+  - `source`: Source identifier
+- Returns:
+  - Any error that occurred
+
+**`RemoveAnalysisBuffer(source string) error`** (`buffer_manager.go`): Safely removes and cleans up a ring buffer for a single source
+- Arguments:
+  - `source`: Source identifier
+- Returns:
+  - Any error that occurred
+
+**`AllocateCaptureBuffer(durationSeconds, sampleRate, bytesPerSample int, source string) error`** (`buffer_manager.go`): Initializes a capture buffer for a single source
+- Arguments:
+  - `durationSeconds`: Buffer duration in seconds
+  - `sampleRate`: Sample rate in Hz
+  - `bytesPerSample`: Bytes per audio sample
+  - `source`: Source identifier
+- Returns:
+  - Any error that occurred
+
+**`RemoveCaptureBuffer(source string) error`** (`buffer_manager.go`): Safely removes a capture buffer for a single source
+- Arguments:
+  - `source`: Source identifier
+- Returns:
+  - Any error that occurred
+
+**`WriteToAnalysisBuffer(stream string, data []byte) error`** (`buffer_manager.go`): Writes audio data into the analysis buffer for a given stream
+- Arguments:
+  - `stream`: Stream identifier
+  - `data`: Audio data to write
+- Returns:
+  - Any error that occurred
+
+**`ReadFromAnalysisBuffer(stream string, optionalConfig *BufferConfig) ([]byte, error)`** (`buffer_manager.go`): Reads a sliding chunk of audio data from the buffer for a given stream
+- Arguments:
+  - `stream`: Stream identifier
+  - `optionalConfig`: Optional buffer configuration
+- Returns:
+  - Audio data and any error
+
+**`WriteToCaptureBuffer(source string, data []byte) error`** (`buffer_manager.go`): Writes audio data to the capture buffer for a given source
+- Arguments:
+  - `source`: Source identifier
+  - `data`: Audio data to write
+- Returns:
+  - Any error that occurred
+
+**`ReadSegmentFromCaptureBuffer(source string, requestedStartTime time.Time, duration int) ([]byte, error)`** (`buffer_manager.go`): Reads a time-based segment from the capture buffer
+- Arguments:
+  - `source`: Source identifier
+  - `requestedStartTime`: Segment start time
+  - `duration`: Segment duration in seconds
+- Returns:
+  - Audio segment and any error
+
+**`CleanupAllBuffers()`** (`buffer_manager.go`): Cleans up all allocated buffers
+- No arguments
+- No return value
+
+**`HasAnalysisBuffer(source string) bool`** (`buffer_manager.go`): Checks if an analysis buffer exists for a given source
+- Arguments:
+  - `source`: Source identifier
+- Returns:
+  - Whether the buffer exists
+
+**`HasCaptureBuffer(source string) bool`** (`buffer_manager.go`): Checks if a capture buffer exists for a given source
+- Arguments:
+  - `source`: Source identifier
+- Returns:
+  - Whether the buffer exists
+
+#### Buffer Factory
+
+**`NewBufferFactory() *BufferFactory`** (`buffer_factory.go`): Creates a buffer factory with default dependencies
+- Returns:
+  - A new buffer factory
+
+**`NewBufferFactoryWithDeps(logger Logger, timeProvider TimeProvider, config *BufferConfig, ringBufferFactory func(size int) RingBufferInterface) *BufferFactory`** (`buffer_factory.go`): Creates a buffer factory with custom dependencies
+- Arguments:
+  - `logger`: Logger implementation
+  - `timeProvider`: Time provider implementation
+  - `config`: Buffer configuration
+  - `ringBufferFactory`: Factory function for ring buffers
+- Returns:
+  - A new buffer factory with custom dependencies
+
+#### BufferFactory Methods
+
+**`CreateAnalysisBuffer(sampleRate, channels uint32, duration time.Duration) AnalysisBufferInterface`** (`buffer_factory.go`): Creates a new analysis buffer
+- Arguments:
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `duration`: Buffer duration
+- Returns:
+  - A new analysis buffer
+
+**`CreateCaptureBuffer(sampleRate, channels uint32, duration time.Duration) CaptureBufferInterface`** (`buffer_factory.go`): Creates a new capture buffer
+- Arguments:
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+  - `duration`: Buffer duration
+- Returns:
+  - A new capture buffer
+
+**`CreateBufferManager() BufferManagerInterface`** (`buffer_factory.go`): Creates a new buffer manager
+- Returns:
+  - A new buffer manager
+
+#### Buffer Configuration
+
+**`NewDefaultBufferConfig() *BufferConfig`** (`buffer_config.go`): Creates a config with sensible defaults
+- Returns:
+  - A new buffer configuration with default values
+
 ## Cross-Platform Considerations
 
 - No platform-specific code in the buffer implementation

@@ -343,8 +343,8 @@ func (m *Monitor) checkOrphanedSystemProcesses() error {
 	// Track PIDs of processes we know about
 	knownPIDs := make(map[int]bool)
 	for _, proc := range trackedProcesses {
-		if proc.cmd != nil && proc.cmd.Process != nil {
-			knownPIDs[proc.cmd.Process.Pid] = true
+		if proc.cmd != nil && proc.cmd.Process() != nil {
+			knownPIDs[proc.cmd.Process().Pid] = true
 		}
 	}
 

@@ -101,7 +101,7 @@ func (m *FFmpegManager) AddStream(config *stream.Config) error {
 		builder.DisableVideo()
 
 		// Start FFmpeg process
-		process, err := ffmpeg.Start(ctx, ffmpeg.ProcessOptions{
+		process, err := ffmpeg.Start(ctx, &ffmpeg.ProcessOptions{
 			FFmpegPath: m.ffmpegPath,
 			Args:       builder.Build(),
 		})

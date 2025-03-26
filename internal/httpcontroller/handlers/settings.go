@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/tphakala/birdnet-go/internal/audio"
 	"github.com/tphakala/birdnet-go/internal/audio/capture"
+	"github.com/tphakala/birdnet-go/internal/audio/equalizer"
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
@@ -146,7 +146,7 @@ func (h *Handlers) SaveSettings(c echo.Context) error {
 	// Check if audio equalizer settings have changed
 	if equalizerSettingsChanged(oldSettings.Realtime.Audio.Equalizer, settings.Realtime.Audio.Equalizer) {
 		// Update equalizer settings
-		if err := audio.UpdateFilterChain(settings); err != nil {
+		if err := equalizer.UpdateFilterChain(settings); err != nil {
 			log.Printf("Failed to update audio EQ filter chain: %v", err)
 			h.SSE.SendNotification(Notification{
 				Type:    "error",

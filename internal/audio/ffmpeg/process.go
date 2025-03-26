@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os/exec"
 	"sync"
 	"time"
 )
 
 // Process represents an FFmpeg process
 type Process struct {
-	cmd             *exec.Cmd
+	cmd             Commander
 	stdout          io.ReadCloser
 	stderr          io.ReadCloser
 	stdin           io.WriteCloser
@@ -37,7 +36,8 @@ type RestartInfo struct {
 type ProcessOptions struct {
 	FFmpegPath string
 	Args       []string
-	InputData  []byte // Optional: data to write to stdin
+	InputData  []byte          // Optional: data to write to stdin
+	Executor   CommandExecutor // Optional: custom command executor
 }
 
 // ProcessError is an error with FFmpeg stderr output
@@ -106,16 +106,22 @@ func (b *BoundedBuffer) Reset() {
 }
 
 // Start starts a new FFmpeg process
-func Start(ctx context.Context, opts ProcessOptions) (*Process, error) {
+func Start(ctx context.Context, opts *ProcessOptions) (*Process, error) {
 	if opts.FFmpegPath == "" {
 		return nil, errors.New("FFmpeg path not specified")
+	}
+
+	// Use provided executor or default
+	executor := opts.Executor
+	if executor == nil {
+		executor = DefaultExecutor
 	}
 
 	// Create context with cancellation
 	pctx, cancel := context.WithCancel(ctx)
 
 	// Create command
-	cmd := exec.CommandContext(pctx, opts.FFmpegPath, opts.Args...)
+	cmd := executor.Command(opts.FFmpegPath, opts.Args...)
 
 	// Set up process group based on platform
 	setupProcessGroup(cmd)
@@ -244,8 +250,13 @@ func (p *Process) Stop() error {
 	// Wait with timeout for process to exit
 	done := make(chan error, 1)
 	go func() {
-		if p.cmd != nil && p.cmd.Process != nil {
-			done <- p.cmd.Wait()
+		if p.cmd != nil {
+			proc := p.cmd.Process()
+			if proc != nil {
+				done <- p.cmd.Wait()
+			} else {
+				done <- nil
+			}
 		} else {
 			done <- nil
 		}

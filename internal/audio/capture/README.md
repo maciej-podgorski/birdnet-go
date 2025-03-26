@@ -135,6 +135,270 @@ if err != nil {
 context.Uninit()
 ```
 
+## API Reference
+
+### Types
+
+#### Core Interfaces and Adapters
+
+**`MalgoContextAdapter`** (`context.go`): Adapts malgo.AllocatedContext to the AudioContext interface
+- Fields:
+  - `context`: The underlying malgo.AllocatedContext
+  - `mu`: Mutex for thread safety
+- Methods:
+  - `Devices(deviceType malgo.DeviceType) ([]malgo.DeviceInfo, error)`: Lists audio devices
+  - `InitDevice(config *malgo.DeviceConfig, callbacks malgo.DeviceCallbacks) (*malgo.Device, error)`: Initializes a device
+  - `Uninit() error`: Uninitializes the context
+  - `GetRawContext() *malgo.AllocatedContext`: Returns the underlying context
+
+**`MalgoDeviceAdapter`** (`device.go`): Adapts malgo.Device to the AudioDevice interface
+- Fields:
+  - `device`: The underlying malgo.Device
+  - `mu`: Mutex for thread safety
+- Methods:
+  - `Start() error`: Starts the device
+  - `Stop() error`: Stops the device
+  - `Uninit() error`: Uninitializes the device
+  - `GetRawDevice() *malgo.Device`: Returns the underlying device
+
+**`ContextFactory`** (`capture_factory.go`): Factory for creating audio contexts
+- Fields:
+  - `debug`: Debug mode flag
+- Methods:
+  - `CreateAudioContext(logger func(string)) (audio.AudioContext, error)`: Creates a new audio context
+  
+**`DeviceManager`** (`device_manager.go`): Manages audio capture devices
+- Fields:
+  - `context`: Audio context for device operations
+  - `bufferManager`: Buffer manager for audio data
+  - `devices`: Map of device states
+  - `callbackMap`: Map of device callbacks
+  - `dataCallback`: Callback for audio data
+  - `stopCallback`: Callback for device stops
+  - `restartEnabled`: Whether automatic restart is enabled
+  - `restartDelay`: Delay between restart attempts
+  - `quitChan`: Channel for signaling shutdown
+  - `mu`: Mutex for thread safety
+  - `wg`: WaitGroup for goroutine synchronization
+
+**`deviceState`** (`device_manager.go`): Tracks the state of a capture device
+- Fields:
+  - `info`: Device information
+  - `device`: Audio device instance
+  - `sourceID`: Unique source identifier
+  - `isActive`: Whether the device is active
+  - `restartAttempts`: Count of restart attempts
+
+**`captureDeviceInfo`** (`device_manager.go`): Stores device identification information
+- Fields:
+  - `Name`: Device name
+  - `ID`: Device ID
+  - `Pointer`: Device pointer for malgo
+
+### Functions
+
+#### Context and Device Creation
+
+**`NewMalgoContextAdapter(backends []malgo.Backend, config *malgo.ContextConfig, logger func(string)) (audio.AudioContext, error)`** (`context.go`): Creates a new context adapter
+- Arguments:
+  - `backends`: Audio backends to use
+  - `config`: Context configuration
+  - `logger`: Optional logging function
+- Returns:
+  - Audio context and any error
+
+**`NewMalgoDeviceAdapter(device *malgo.Device) audio.AudioDevice`** (`device.go`): Creates a new device adapter
+- Arguments:
+  - `device`: Malgo device to adapt
+- Returns:
+  - Audio device implementation
+
+**`NewContextFactory(debug bool) *ContextFactory`** (`capture_factory.go`): Creates a new context factory
+- Arguments:
+  - `debug`: Whether to enable debug mode
+- Returns:
+  - A new context factory
+
+**`DefaultAudioContextFactory() audio.AudioContextFactory`** (`capture_factory.go`): Returns the default factory implementation
+- Returns:
+  - Default audio context factory
+
+#### Device Management
+
+**`NewDeviceManager(context audio.AudioContext, bufferManager audio.BufferManager) *DeviceManager`** (`device_manager.go`): Creates a new device manager
+- Arguments:
+  - `context`: Audio context for device operations
+  - `bufferManager`: Buffer manager for audio data
+- Returns:
+  - A new device manager
+
+#### Utility Functions
+
+**`HexToASCII(hexStr string) (string, error)`** (`utils.go`): Converts a hexadecimal string to ASCII
+- Arguments:
+  - `hexStr`: Hexadecimal string
+- Returns:
+  - ASCII string and any error
+
+**`TestDevice(ctx audio.AudioContext, deviceID string, sampleRate, channels uint32) bool`** (`utils.go`): Tests if a device can be used with the given parameters
+- Arguments:
+  - `ctx`: Audio context
+  - `deviceID`: Device identifier
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+- Returns:
+  - Whether the device can be used
+
+**`ValidateAudioDevice(deviceID string, ctx audio.AudioContext, sampleRate, channels uint32) error`** (`utils.go`): Validates a device configuration
+- Arguments:
+  - `deviceID`: Device identifier
+  - `ctx`: Audio context
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+- Returns:
+  - Error if validation fails
+
+**`ConvertMalgoDeviceInfo(info *malgo.DeviceInfo) (audio.DeviceInfo, error)`** (`utils.go`): Converts malgo device info to audio device info
+- Arguments:
+  - `info`: Malgo device info
+- Returns:
+  - Audio device info and any error
+
+**`isHardwareDevice(deviceID string) bool`** (`utils.go`): Checks if a device ID represents hardware
+- Arguments:
+  - `deviceID`: Device identifier
+- Returns:
+  - Whether the device is hardware
+
+**`matchesDeviceSettings(decodedID, deviceName, configuredID string) bool`** (`utils.go`): Checks if a device matches configuration
+- Arguments:
+  - `decodedID`: Decoded device ID
+  - `deviceName`: Device name
+  - `configuredID`: Configured ID
+- Returns:
+  - Whether the device matches
+
+### Methods
+
+#### ContextFactory Methods
+
+**`CreateAudioContext(logger func(string)) (audio.AudioContext, error)`** (`capture_factory.go`): Creates a new audio context
+- Arguments:
+  - `logger`: Optional logging function
+- Returns:
+  - Audio context and any error
+
+#### MalgoContextAdapter Methods
+
+**`Devices(deviceType malgo.DeviceType) ([]malgo.DeviceInfo, error)`** (`context.go`): Lists audio devices
+- Arguments:
+  - `deviceType`: Type of devices to list
+- Returns:
+  - List of device info and any error
+
+**`InitDevice(config *malgo.DeviceConfig, callbacks malgo.DeviceCallbacks) (*malgo.Device, error)`** (`context.go`): Initializes a device
+- Arguments:
+  - `config`: Device configuration
+  - `callbacks`: Device callbacks
+- Returns:
+  - Malgo device and any error
+
+**`Uninit() error`** (`context.go`): Uninitializes the context
+- Returns:
+  - Any error that occurred
+
+**`GetRawContext() *malgo.AllocatedContext`** (`context.go`): Returns the underlying context
+- Returns:
+  - The underlying malgo context
+
+#### MalgoDeviceAdapter Methods
+
+**`Start() error`** (`device.go`): Starts the device
+- Returns:
+  - Any error that occurred
+
+**`Stop() error`** (`device.go`): Stops the device
+- Returns:
+  - Any error that occurred
+
+**`Uninit() error`** (`device.go`): Uninitializes the device
+- Returns:
+  - Any error that occurred
+
+**`GetRawDevice() *malgo.Device`** (`device.go`): Returns the underlying device
+- Returns:
+  - The underlying malgo device
+
+#### DeviceManager Methods
+
+**`SetDataCallback(callback func(sourceID string, data []byte, frameCount uint32))`** (`device_manager.go`): Sets the data callback
+- Arguments:
+  - `callback`: Function to call when audio data arrives
+
+**`SetStopCallback(callback func(sourceID string))`** (`device_manager.go`): Sets the stop callback
+- Arguments:
+  - `callback`: Function to call when a device stops
+
+**`SetRestartOptions(enabled bool, delay time.Duration)`** (`device_manager.go`): Configures automatic restart behavior
+- Arguments:
+  - `enabled`: Whether to enable automatic restart
+  - `delay`: Delay between restart attempts
+
+**`StartCapture(deviceID string, sampleRate, channels uint32) error`** (`device_manager.go`): Starts audio capture from a device
+- Arguments:
+  - `deviceID`: Device identifier
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+- Returns:
+  - Any error that occurred
+
+**`StopCapture(deviceID string) error`** (`device_manager.go`): Stops audio capture from a device
+- Arguments:
+  - `deviceID`: Device identifier
+- Returns:
+  - Any error that occurred
+
+**`ListDevices() ([]audio.DeviceInfo, error)`** (`device_manager.go`): Lists all available capture devices
+- Returns:
+  - List of device info and any error
+
+**`GetDevice(deviceID string) (audio.DeviceInfo, error)`** (`device_manager.go`): Gets information about a specific device
+- Arguments:
+  - `deviceID`: Device identifier
+- Returns:
+  - Device info and any error
+
+**`Close() error`** (`device_manager.go`): Stops all devices and closes the manager
+- Returns:
+  - Any error that occurred
+
+**`GetPlatformSpecificDevices() ([]audio.DeviceInfo, error)`** (`device_manager.go`): Gets platform-specific devices
+- Returns:
+  - List of device info and any error
+
+**`createAndStartDevice(deviceID string, deviceInfo captureDeviceInfo, sourceID string, sampleRate, channels uint32) (audio.AudioDevice, error)`** (`device_manager.go`): Creates and starts a device
+- Arguments:
+  - `deviceID`: Device identifier
+  - `deviceInfo`: Device information
+  - `sourceID`: Source identifier
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+- Returns:
+  - Audio device and any error
+
+**`attemptDeviceRestart(deviceID string, deviceInfo captureDeviceInfo, sampleRate, channels uint32)`** (`device_manager.go`): Attempts to restart a failed device
+- Arguments:
+  - `deviceID`: Device identifier
+  - `deviceInfo`: Device information
+  - `sampleRate`: Sample rate in Hz
+  - `channels`: Number of audio channels
+
+**`getDeviceInfo(deviceID string) (captureDeviceInfo, error)`** (`device_manager.go`): Gets internal device info
+- Arguments:
+  - `deviceID`: Device identifier
+- Returns:
+  - Capture device info and any error
+
 ## Cross-Platform Considerations
 
 - Uses proper platform detection via runtime.GOOS
@@ -165,5 +429,6 @@ The package includes comprehensive tests for all components:
 
 ## Dependencies
 
-- github.com/gen2brain/malgo: Cross-platform audio library
+- github.com/tphakala/malgo: Cross-platform audio library (fork of gen2brain/malgo)
 - Internal audio interfaces defined in internal/audio
+- Standard library: sync, time, log, fmt, strings, etc.

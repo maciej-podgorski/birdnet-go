@@ -1,18 +1,17 @@
 // Package audio provides core functionality for audio processing in BirdNET-Go.
-package audio
+package equalizer
 
 import (
 	"encoding/binary"
 	"fmt"
 	"sync"
 
-	"github.com/tphakala/birdnet-go/internal/audio/equalizer"
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
 // Global variables for filter chain and mutex
 var (
-	filterChain *equalizer.FilterChain
+	filterChain *FilterChain
 	filterMutex sync.RWMutex
 )
 
@@ -22,7 +21,7 @@ func InitializeFilterChain(settings *conf.Settings) error {
 	defer filterMutex.Unlock()
 
 	// Create a new filter chain
-	filterChain = equalizer.NewFilterChain()
+	filterChain = NewFilterChain()
 
 	// If equalizer is enabled in settings, add filters
 	if settings.Realtime.Audio.Equalizer.Enabled {
@@ -50,7 +49,7 @@ func UpdateFilterChain(settings *conf.Settings) error {
 	defer filterMutex.Unlock()
 
 	// Create a new filter chain
-	newFilterChain := equalizer.NewFilterChain()
+	newFilterChain := NewFilterChain()
 
 	// If equalizer is enabled, add filters
 	if settings.Realtime.Audio.Equalizer.Enabled {
@@ -107,7 +106,7 @@ func ApplyFilters(samples []byte) error {
 }
 
 // createFilter creates an audio filter based on the provided configuration
-func createFilter(config conf.EqualizerFilter, sampleRate float64) (*equalizer.Filter, error) {
+func createFilter(config conf.EqualizerFilter, sampleRate float64) (*Filter, error) {
 	// If passes is 0 or less, return nil without an error (filter is off)
 	if config.Passes <= 0 {
 		return nil, nil
@@ -116,21 +115,21 @@ func createFilter(config conf.EqualizerFilter, sampleRate float64) (*equalizer.F
 	// Create different types of filters based on the configuration
 	switch config.Type {
 	case "LowPass":
-		return equalizer.NewLowPass(sampleRate, config.Frequency, config.Q, config.Passes)
+		return NewLowPass(sampleRate, config.Frequency, config.Q, config.Passes)
 	case "HighPass":
-		return equalizer.NewHighPass(sampleRate, config.Frequency, config.Q, config.Passes)
+		return NewHighPass(sampleRate, config.Frequency, config.Q, config.Passes)
 	case "AllPass":
-		return equalizer.NewAllPass(sampleRate, config.Frequency, config.Q, config.Passes)
+		return NewAllPass(sampleRate, config.Frequency, config.Q, config.Passes)
 	case "BandPass":
-		return equalizer.NewBandPass(sampleRate, config.Frequency, config.Width, config.Passes)
+		return NewBandPass(sampleRate, config.Frequency, config.Width, config.Passes)
 	case "BandReject":
-		return equalizer.NewBandReject(sampleRate, config.Frequency, config.Width, config.Passes)
+		return NewBandReject(sampleRate, config.Frequency, config.Width, config.Passes)
 	case "LowShelf":
-		return equalizer.NewLowShelf(sampleRate, config.Frequency, config.Q, config.Gain, config.Passes)
+		return NewLowShelf(sampleRate, config.Frequency, config.Q, config.Gain, config.Passes)
 	case "HighShelf":
-		return equalizer.NewHighShelf(sampleRate, config.Frequency, config.Q, config.Gain, config.Passes)
+		return NewHighShelf(sampleRate, config.Frequency, config.Q, config.Gain, config.Passes)
 	case "Peaking":
-		return equalizer.NewPeaking(sampleRate, config.Frequency, config.Width, config.Gain, config.Passes)
+		return NewPeaking(sampleRate, config.Frequency, config.Width, config.Gain, config.Passes)
 	default:
 		return nil, fmt.Errorf("unsupported filter type: %s", config.Type)
 	}
