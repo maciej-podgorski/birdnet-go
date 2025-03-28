@@ -166,7 +166,7 @@ func (r *FLACReader) fillBuffer(minSamples int) error {
 }
 
 // ReadChunk reads the next chunk of audio data.
-func (r *FLACReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
+func (r *FLACReader) ReadChunk(chunkDuration, overlap float64) (Chunk, error) {
 	if !r.isOpen {
 		return Chunk{}, errors.New("file not open")
 	}
@@ -278,7 +278,7 @@ func (r *FLACReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, e
 }
 
 // ProcessFile processes the entire file in chunks.
-func (r *FLACReader) ProcessFile(ctx context.Context, chunkDuration float64, overlap float64, processor ChunkProcessor) error {
+func (r *FLACReader) ProcessFile(ctx context.Context, chunkDuration, overlap float64, processor ChunkProcessor) error {
 	if !r.isOpen {
 		return errors.New("file not open")
 	}

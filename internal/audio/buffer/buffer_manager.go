@@ -62,11 +62,29 @@ func (bm *BufferManager) AllocateAnalysisBuffer(capacity int, source string) err
 		return fmt.Errorf("empty source name provided")
 	}
 
-	// Create a new analysis buffer
+	// Calculate buffer duration based on capacity
+	sampleRate := uint32(bm.config.SampleRate)
+	channels := uint32(1) // Assuming mono for now
+	bytesPerSample := 2   // Assuming 16-bit samples
+
+	// Calculate duration from capacity, sample rate, channels, and bytes per sample
+	bytesPerSecond := int(sampleRate * channels * uint32(bytesPerSample))
+	if bytesPerSecond <= 0 {
+		return fmt.Errorf("invalid bytes per second: %d", bytesPerSecond)
+	}
+
+	durationSeconds := float64(capacity) / float64(bytesPerSecond)
+	duration := time.Duration(durationSeconds * float64(time.Second))
+
+	// Log what we're doing to help debug
+	bm.logger.Info("Creating analysis buffer for source %s with capacity %d bytes (%.2f seconds)",
+		source, capacity, durationSeconds)
+
+	// Create a new analysis buffer with the calculated duration
 	ab := bm.bufferFactory.CreateAnalysisBuffer(
-		uint32(bm.config.SampleRate),
-		1, // Assuming mono for simplicity
-		bm.config.DefaultAnalysisDuration,
+		sampleRate,
+		channels,
+		duration, // Use the duration we calculated from capacity
 	)
 
 	if ab == nil {
@@ -307,4 +325,18 @@ func (bm *BufferManager) HasCaptureBuffer(source string) bool {
 	defer bm.captureMutex.RUnlock()
 	_, exists := bm.captureBuffers[source]
 	return exists
+}
+
+// GetAnalysisBufferCapacity returns the capacity of the analysis buffer for a given source
+// This is useful for debugging buffer sizing issues
+func (bm *BufferManager) GetAnalysisBufferCapacity(source string) (int, error) {
+	bm.analysisMutex.RLock()
+	defer bm.analysisMutex.RUnlock()
+
+	ab, exists := bm.analysisBuffers[source]
+	if !exists {
+		return 0, fmt.Errorf("no analysis buffer found for source: %s", source)
+	}
+
+	return ab.Capacity(), nil
 }

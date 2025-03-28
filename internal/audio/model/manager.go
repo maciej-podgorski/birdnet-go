@@ -186,43 +186,6 @@ func (m *Manager) Cleanup() {
 	m.modelInstances = make(map[string]*birdnet.BirdNET)
 }
 
-// shouldAnalyze determines if it's time to analyze data from this source
-// based on the last analysis time and the overlap settings
-func (m *Manager) shouldAnalyze(sourceID string) bool {
-	// BirdNET analysis is based on 3-second segments
-	bufferDuration := 3 * time.Second
-
-	// Get the overlap from settings (default to 0 if not set)
-	var overlapDuration time.Duration
-	if m.settings != nil {
-		overlapDuration = time.Duration(m.settings.BirdNET.Overlap * float64(time.Second))
-	}
-
-	// Calculate the minimum time between analyses
-	// With 3s segments and 1s overlap, we should analyze every 2s
-	effectiveInterval := bufferDuration - overlapDuration
-	if effectiveInterval <= 0 {
-		// Default to 1 second if calculation is invalid
-		effectiveInterval = 1 * time.Second
-	}
-
-	// Check if enough time has passed since the last analysis
-	LastAnalysisTime.RLock()
-	lastTime, exists := LastAnalysisTime.times[sourceID]
-	LastAnalysisTime.RUnlock()
-
-	// If this is the first analysis or enough time has passed
-	if !exists || time.Since(lastTime) >= effectiveInterval {
-		// Update the last analysis time
-		LastAnalysisTime.Lock()
-		LastAnalysisTime.times[sourceID] = time.Now()
-		LastAnalysisTime.Unlock()
-		return true
-	}
-
-	return false
-}
-
 // hasCompleteData checks if the provided data buffer has enough samples for a complete analysis
 func (m *Manager) hasCompleteData(data []byte) bool {
 	// Calculate required buffer size for a 3-second segment at the configured sample rate
@@ -241,11 +204,6 @@ func (m *Manager) hasCompleteData(data []byte) bool {
 
 // Analyze sends audio data to the appropriate BirdNET instance for analysis.
 func (m *Manager) Analyze(sourceID string, data []byte, startTime int64) error {
-	// Check if we should analyze this sample based on timing
-	if !m.shouldAnalyze(sourceID) {
-		return nil // Skip this sample, not time to analyze yet
-	}
-
 	// Check if we have enough data for a complete analysis
 	if !m.hasCompleteData(data) {
 		if m.settings.BirdNET.Debug {

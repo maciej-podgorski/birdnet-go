@@ -84,7 +84,4 @@ type Manager interface {
 	// ReadChunks reads all chunks from a file and returns them.
 	// Note: Use with caution for large files.
 	ReadChunks(filePath string, chunkDuration float64, overlap float64) ([]Chunk, error)
-
-	// ConvertToPCM converts the audio file to PCM format.
-	ConvertToPCM(filePath string, outputPath string, format Format) error
 }

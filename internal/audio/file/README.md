@@ -20,22 +20,26 @@ The file system follows an interface-based design:
 - **ReaderFactory**: Factory interface for creating appropriate readers
   - Creates format-specific readers based on file extensions
   - Encapsulates reader creation logic for easy extension
+  - Supports automatic resampling to target sample rate (typically 48kHz)
 
 - **Manager**: High-level interface for audio file operations
   - Provides methods for file validation, info extraction, and processing
   - Coordinates between file formats through the ReaderFactory
   - Handles audio file conversion (PCM conversion feature planned)
+  - Enables automatic resampling of audio to target sample rate
 
 ### Implementations
 
 - **StandardReaderFactory**: Default implementation of ReaderFactory
   - Creates type-specific readers (WAVReader, FLACReader) based on file extension
   - Handles unsupported format errors
+  - Automatically wraps readers with resampling functionality when needed
 
 - **StandardManager**: Default implementation of Manager
   - Uses ReaderFactory to create appropriate readers
   - Provides file validation, info extraction, and processing functionality
   - Implements chunk reading and audio conversion operations
+  - Supports configurable resampling settings
 
 - **WAVReader**: WAVE format implementation of Reader
   - Handles .wav file reading and metadata extraction
@@ -45,11 +49,30 @@ The file system follows an interface-based design:
   - Handles .flac file reading and metadata extraction
   - Processes audio data in configurable chunks
 
+- **ResamplingReaderWrapper**: Wrapper for any Reader implementation
+  - Provides transparent resampling of audio data to target sample rate
+  - Preserves the original reader interface
+  - Optimized for BirdNET's 48kHz processing requirement
+
 ### Types
 
 - **Format**: Enum type for audio formats (PCM, WAV, FLAC)
 - **Info**: Structure containing audio file metadata (sample rate, channels, bits per sample, duration)
 - **Chunk**: Structure representing a chunk of audio data with timing information
+
+### Resampling
+
+- **StreamingResampler**: Optimized resampler for streaming audio
+  - Efficiently converts audio between different sample rates
+  - Optimized for common rates like 16kHz → 48kHz and 32kHz → 48kHz
+  - Preserves audio quality with proper filtering
+  - Minimal memory usage for efficient processing
+
+- **ResamplingReaderWrapper**: Wrapper that provides transparent resampling
+  - Automatically detects when resampling is needed
+  - Maintains proper timing information through resampling
+  - Efficiently resamples audio chunks on-the-fly
+  - Properly handles seeking and other operations
 
 ### Export Functions
 
@@ -76,6 +99,8 @@ The file system follows an interface-based design:
 - **Error Handling**: Proper error wrapping and descriptive error messages
 - **Resource Management**: Ensures proper cleanup of file handles
 - **Audio Export**: Converts raw PCM data to various audio formats
+- **Automatic Resampling**: Transparently resamples audio to the target sample rate
+- **Sample Rate Normalization**: All audio is normalized to 48kHz for BirdNET processing
 
 ## Usage Examples
 
@@ -136,13 +161,13 @@ if err != nil {
 }
 ```
 
-### Reading All Chunks
+### Reading All Chunks (With Automatic Resampling)
 
 ```go
-// Create a file manager
+// Create a file manager with resampling enabled (default)
 fileManager := file.NewManager(false)
 
-// Read all chunks from a file
+// Read all chunks from a file - they will be automatically resampled to 48kHz if needed
 chunks, err := fileManager.ReadChunks("path/to/audio.wav", 3.0, 0.0)
 if err != nil {
     log.Fatal("Failed to read chunks:", err)
@@ -153,6 +178,23 @@ for i, chunk := range chunks {
     fmt.Printf("Chunk %d: %.2f seconds, %d samples\n", 
         i, chunk.StartTime, len(chunk.Data)/4) // Assuming 16-bit stereo
 }
+```
+
+### Using Custom Resampling Options
+
+```go
+// Create a file manager with custom resampling options
+// Parameters: debug, targetSampleRate, enableResampling
+fileManager := file.NewManagerWithOptions(false, 44100, true)
+
+// Process audio file - it will be resampled to 44.1kHz if needed
+err := fileManager.ProcessAudioFile(ctx, "path/to/audio.wav", 3.0, 1.5, processor)
+if err != nil {
+    log.Fatal("Failed to process audio file:", err)
+}
+
+// Disable resampling entirely if needed
+fileManagerNoResampling := file.NewManagerWithOptions(false, 48000, false)
 ```
 
 ### Exporting Audio to Different Formats

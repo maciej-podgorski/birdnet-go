@@ -3,6 +3,7 @@ package buffer
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -11,12 +12,12 @@ import (
 
 // AnalysisBuffer implements the AnalysisBufferInterface for audio analysis.
 type AnalysisBuffer struct {
-	buffer          RingBufferInterface
-	prevData        []byte
-	sampleRate      uint32
-	channels        uint32
-	threshold       int
-	overlapFraction float64
+	buffer      RingBufferInterface
+	prevData    []byte
+	sampleRate  uint32
+	channels    uint32
+	threshold   int
+	overlapSize float64
 
 	warningCounter int
 	mu             sync.RWMutex
@@ -48,19 +49,20 @@ func NewAnalysisBufferWithDeps(
 	bytesPerSecond := int(sampleRate * channels * 2)
 	bufferSize := bytesPerSecond * int(duration.Seconds())
 
-	// Analysis threshold is typically 75% of the buffer
-	threshold := bufferSize * 3 / 4
+	// Analysis threshold is now 40% of the buffer (reduced from 75%)
+	// This allows analysis to start sooner, preventing buffer overflow
+	threshold := bufferSize * 4 / 10
 
 	return &AnalysisBuffer{
-		buffer:          ringBufferFactory(bufferSize),
-		prevData:        nil,
-		sampleRate:      sampleRate,
-		channels:        channels,
-		threshold:       threshold,
-		overlapFraction: 0.25, // Default value, can be made configurable
-		warningCounter:  0,
-		logger:          logger,
-		timeProvider:    timeProvider,
+		buffer:         ringBufferFactory(bufferSize),
+		prevData:       nil,
+		sampleRate:     sampleRate,
+		channels:       channels,
+		threshold:      threshold,
+		overlapSize:    0,
+		warningCounter: 0,
+		logger:         logger,
+		timeProvider:   timeProvider,
 	}
 }
 
@@ -144,10 +146,13 @@ func (ab *AnalysisBuffer) Read(p []byte) (int, error) {
 	defer ab.mu.Unlock()
 
 	// Calculate read size based on the overlap
-	readSize := int(float64(len(p)) * (1.0 - ab.overlapFraction))
+	readSize := int(float64(len(p)) * (3.0 - ab.overlapSize))
+	log.Printf("Read size: %d, overlap size: %f", readSize, ab.overlapSize)
 
-	// Calculate the number of bytes in the buffer
+	// Get the available bytes in the buffer
 	bytesAvailable := ab.buffer.Length()
+
+	// Make sure we have enough data to read
 	if bytesAvailable < readSize {
 		return 0, nil // Not enough data yet
 	}
@@ -173,7 +178,7 @@ func (ab *AnalysisBuffer) Read(p []byte) (int, error) {
 		// Copy the data into the output buffer
 		n := copy(p, ab.prevData[:len(p)])
 
-		// Update prevData for the next iteration
+		// Remove the data we just read from the previous data
 		ab.prevData = ab.prevData[readSize:]
 
 		return n, nil
@@ -215,12 +220,10 @@ func (ab *AnalysisBuffer) Channels() uint32 {
 	return ab.channels
 }
 
-// SetOverlapFraction sets the overlap fraction for the buffer.
-func (ab *AnalysisBuffer) SetOverlapFraction(fraction float64) {
-	ab.mu.Lock()
-	defer ab.mu.Unlock()
+// Capacity returns the capacity of the underlying buffer in bytes.
+func (ab *AnalysisBuffer) Capacity() int {
+	ab.mu.RLock()
+	defer ab.mu.RUnlock()
 
-	if fraction >= 0.0 && fraction < 1.0 {
-		ab.overlapFraction = fraction
-	}
+	return ab.buffer.Capacity()
 }

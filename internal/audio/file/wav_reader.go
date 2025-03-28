@@ -174,7 +174,7 @@ func (r *WAVReader) fillBuffer(minSamples int) error {
 }
 
 // ReadChunk reads the next chunk of audio data.
-func (r *WAVReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, error) {
+func (r *WAVReader) ReadChunk(chunkDuration, overlap float64) (Chunk, error) {
 	if !r.isOpen {
 		return Chunk{}, errors.New("file not open")
 	}
@@ -286,7 +286,7 @@ func (r *WAVReader) ReadChunk(chunkDuration float64, overlap float64) (Chunk, er
 }
 
 // ProcessFile processes the entire file in chunks.
-func (r *WAVReader) ProcessFile(ctx context.Context, chunkDuration float64, overlap float64, processor ChunkProcessor) error {
+func (r *WAVReader) ProcessFile(ctx context.Context, chunkDuration, overlap float64, processor ChunkProcessor) error {
 	if !r.isOpen {
 		return errors.New("file not open")
 	}
@@ -353,7 +353,7 @@ func (r *WAVReader) Seek(sampleOffset int) error {
 
 		samplesRemaining := sampleOffset
 		for samplesRemaining > 0 {
-			toRead := min(chunkSize, samplesRemaining)
+			toRead := minInt(chunkSize, samplesRemaining)
 			buf.Data = buf.Data[:toRead]
 
 			n, err := r.decoder.PCMBuffer(buf)
@@ -370,8 +370,8 @@ func (r *WAVReader) Seek(sampleOffset int) error {
 	return nil
 }
 
-// min returns the smaller of two integers
-func min(a, b int) int {
+// minInt returns the smaller of two integers
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}

@@ -211,12 +211,16 @@ func createBuffersIfNeeded(bufMgr buffer.BufferManagerInterface, sourceID string
 		sampleRate := conf.SampleRate
 		bytesPerSample := conf.BitDepth / 8
 		numChannels := conf.NumChannels
+
+		// Calculate total buffer size in bytes
+		// This should match how the buffer manager calculates duration
 		bufferSize := 9 * sampleRate * bytesPerSample * numChannels
 
 		if err := bufMgr.AllocateAnalysisBuffer(bufferSize, sourceID); err != nil {
 			return fmt.Errorf("failed to create analysis buffer: %w", err)
 		}
-		log.Printf("✅ Created analysis buffer for source: %s", sourceID)
+		log.Printf("✅ Created analysis buffer for source: %s, size: %d bytes (9.0 seconds)",
+			sourceID, bufferSize)
 	}
 
 	// Create capture buffer if audio export is enabled
@@ -253,64 +257,6 @@ func writeToBuffers(bufMgr buffer.BufferManagerInterface, sourceID string, data 
 	return nil
 }
 
-// processAudioData handles the common audio processing logic for all audio sources
-func processAudioData(sourceID string, data []byte, startTime time.Time,
-	bufMgr buffer.BufferManagerInterface, modelMgr *model.Manager) {
-	// Early return if model manager is not initialized
-	if modelMgr == nil {
-		log.Printf("⚠️ Model manager not initialized, cannot process audio data from %s", sourceID)
-		return
-	}
-
-	// Create both buffers if needed
-	if err := createBuffersIfNeeded(bufMgr, sourceID); err != nil {
-		log.Printf("❌ %v", err)
-		return
-	}
-
-	// Write data to both buffers
-	if err := writeToBuffers(bufMgr, sourceID, data); err != nil {
-		log.Printf("❌ %v", err)
-		return
-	}
-
-	// Use a proper buffer config with default settings
-	bufferConfig := buffer.NewDefaultBufferConfig()
-
-	// Read from the analysis buffer using the proper buffer API
-	analysisData, err := bufMgr.ReadFromAnalysisBuffer(sourceID, bufferConfig)
-	if err != nil || analysisData == nil {
-		// Not enough data yet or error, just return without analyzing
-		return
-	}
-
-	// Use the manager to analyze audio data
-	if err := modelMgr.Analyze(sourceID, analysisData, startTime.Unix()); err != nil {
-		log.Printf("❌ Error analyzing audio data from %s: %v", sourceID, err)
-	}
-}
-
-// removeBufferIfExists removes a buffer for the given source if it exists
-func removeBufferIfExists(bufferManager buffer.BufferManagerInterface, bufferType, sourceID string) {
-	if bufferType == "analysis" {
-		if bufferManager.HasAnalysisBuffer(sourceID) {
-			if err := bufferManager.RemoveAnalysisBuffer(sourceID); err != nil {
-				log.Printf("⚠️ Error removing analysis buffer for %s: %v", sourceID, err)
-			} else {
-				log.Printf("✅ Removed analysis buffer for %s", sourceID)
-			}
-		}
-	} else if bufferType == "capture" {
-		if bufferManager.HasCaptureBuffer(sourceID) {
-			if err := bufferManager.RemoveCaptureBuffer(sourceID); err != nil {
-				log.Printf("⚠️ Error removing capture buffer for %s: %v", sourceID, err)
-			} else {
-				log.Printf("✅ Removed capture buffer for %s", sourceID)
-			}
-		}
-	}
-}
-
 // RemoveAllBuffersForSource removes both analysis and capture buffers for a given source
 func RemoveAllBuffersForSource(bufMgr buffer.BufferManagerInterface, sourceID string) {
 	// Remove analysis buffer if it exists
@@ -341,7 +287,7 @@ func initAudioDevice(wg *sync.WaitGroup, settings *conf.Settings, quitChan chan 
 		// If no device is configured, check if we need to clean up previous device buffers
 		if bufMgr != nil {
 			// Clean up any buffers from previous audio device configuration
-			RemoveAllBuffersForSource(bufMgr, "malgo")
+			RemoveAllBuffersForSource(bufMgr, "device")
 		}
 		return
 	}
@@ -361,10 +307,45 @@ func initAudioDevice(wg *sync.WaitGroup, settings *conf.Settings, quitChan chan 
 	// Create a device manager to handle audio card capture
 	captureManager := capture.NewDeviceManager(audioCtx, nil)
 
-	// Set data callback to process audio from the device
+	// Variable to store the actual source ID we receive from the callback
+	var actualSourceID string
+	var sourceIDMutex sync.Mutex
+	var analyzerStarted bool
+
+	// Set data callback to ONLY write to buffer, not analyze
 	captureManager.SetDataCallback(func(sourceID string, data []byte, frameCount uint32) {
-		// Use our consolidated processing function
-		processAudioData(sourceID, data, time.Now(), bufMgr, modelMgr)
+		// Skip empty data or invalid source
+		if len(data) == 0 || sourceID == "" {
+			return
+		}
+
+		// Store the actual source ID from the callback
+		sourceIDMutex.Lock()
+		if actualSourceID == "" && sourceID != "" {
+			actualSourceID = sourceID
+			log.Printf("🔍 Detected actual device source ID: %s", actualSourceID)
+		}
+		sourceIDMutex.Unlock()
+
+		// Create buffers if needed
+		if err := createBuffersIfNeeded(bufMgr, sourceID); err != nil {
+			log.Printf("❌ %v", err)
+			return
+		}
+
+		// Write data to both buffers
+		if err := writeToBuffers(bufMgr, sourceID, data); err != nil {
+			log.Printf("❌ %v", err)
+		}
+
+		// Start the analyzer for this source when we receive the first data
+		sourceIDMutex.Lock()
+		if !analyzerStarted && actualSourceID != "" {
+			analyzerStarted = true
+			// Start polling analyzer for the actual source ID
+			StartPollingAnalyzer(wg, settings, quitChan, bufMgr, modelMgr, actualSourceID)
+		}
+		sourceIDMutex.Unlock()
 	})
 
 	// Start capturing from the audio device
@@ -400,7 +381,8 @@ func registerCleanupHandler(wg *sync.WaitGroup, quitChan chan struct{}, cleanupF
 }
 
 // initRTSPStreams initializes the RTSP streams specified in the settings
-func initRTSPStreams(settings *conf.Settings, streamManager audio.StreamManager) {
+func initRTSPStreams(settings *conf.Settings, streamManager audio.StreamManager, wg *sync.WaitGroup, quitChan chan struct{},
+	bufMgr buffer.BufferManagerInterface, modelMgr *model.Manager) {
 	if len(settings.Realtime.RTSP.URLs) == 0 {
 		return
 	}
@@ -419,6 +401,12 @@ func initRTSPStreams(settings *conf.Settings, streamManager audio.StreamManager)
 			log.Printf("❌ Error starting stream %s: %v", url, err)
 		} else {
 			log.Printf("✅ Started stream: %s", url)
+
+			// Generate a unique source ID from the URL
+			sourceID := url
+
+			// Start polling analyzer for this source
+			StartPollingAnalyzer(wg, settings, quitChan, bufMgr, modelMgr, sourceID)
 		}
 	}
 }
@@ -433,11 +421,10 @@ func initStreamManager(ffmpegPath string, audioLevelChan chan audio.AudioLevelDa
 		return nil, nil, fmt.Errorf("failed to create audio components with FFmpeg path: %s", ffmpegPath)
 	}
 
-	// Create a data callback closure that handles the audio processing
+	// Create a data callback closure that ONLY writes to buffers, no analysis
 	dataCallback := func(sourceID, sourceName string, data []byte) {
-		// Skip processing if model manager is not available
-		if modelMgr == nil {
-			log.Printf("⚠️ Model manager not initialized, cannot process audio data from %s", sourceID)
+		// Skip invalid sources or empty data
+		if sourceID == "" || len(data) == 0 {
 			return
 		}
 
@@ -450,27 +437,12 @@ func initStreamManager(ffmpegPath string, audioLevelChan chan audio.AudioLevelDa
 		// Write to both buffers - analysis and capture if it exists
 		if err := writeToBuffers(bufMgr, sourceID, data); err != nil {
 			log.Printf("❌ %v", err)
-			return
-		}
-
-		// Get analysis data using default buffer config
-		bufferConfig := buffer.NewDefaultBufferConfig()
-		analysisData, err := bufMgr.ReadFromAnalysisBuffer(sourceID, bufferConfig)
-		if err != nil || analysisData == nil {
-			// Not enough data yet or error, just return without analyzing
-			return
-		}
-
-		// Analyze the audio data
-		now := time.Now()
-		if err := modelMgr.Analyze(sourceID, analysisData, now.Unix()); err != nil {
-			log.Printf("❌ Error analyzing audio data from %s: %v", sourceID, err)
 		}
 	}
 
 	// Set up callbacks for the stream manager
 	streamManager.SetCallbacks(
-		// Data callback - process the audio data
+		// Data callback - only write data, don't analyze
 		dataCallback,
 		// Level callback - forward audio levels to the UI
 		func(levelData audio.AudioLevelData) {
@@ -512,8 +484,8 @@ func startAudioCapture(wg *sync.WaitGroup, settings *conf.Settings, quitChan, re
 	// Initialize audio device if configured
 	initAudioDevice(wg, settings, quitChan, bufferManager, modelManager)
 
-	// Initialize RTSP streams if configured
-	initRTSPStreams(settings, streamManager)
+	// Initialize RTSP streams if configured - pass wg and quitChan for polling analyzers
+	initRTSPStreams(settings, streamManager, wg, quitChan, bufferManager, modelManager)
 
 	// Register cleanup for the audio components
 	registerCleanupHandler(wg, quitChan, func() {
@@ -585,16 +557,6 @@ func closeDataStore(store datastore.Interface) {
 	} else {
 		log.Println("Successfully closed database")
 	}
-}
-
-// logOperation logs the result of an operation with standardized emojis
-func logOperation(success bool, successMsg, errorMsg string, err error) error {
-	if success {
-		log.Printf("✅ %s", successMsg)
-		return nil
-	}
-	log.Printf("❌ %s: %v", errorMsg, err)
-	return err
 }
 
 // ClipCleanupMonitor monitors the database and deletes clips that meet the retention policy.

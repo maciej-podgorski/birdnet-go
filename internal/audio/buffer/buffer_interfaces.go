@@ -32,6 +32,7 @@ type AudioBuffer interface {
 type AnalysisBufferInterface interface {
 	AudioBuffer
 	ReadyForAnalysis() bool
+	Capacity() int
 }
 
 // CaptureBufferInterface extends AudioBuffer with capture-specific methods
@@ -53,4 +54,5 @@ type BufferManagerInterface interface {
 	CleanupAllBuffers()
 	HasAnalysisBuffer(source string) bool
 	HasCaptureBuffer(source string) bool
+	GetAnalysisBufferCapacity(source string) (int, error)
 }
