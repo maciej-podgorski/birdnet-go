@@ -418,13 +418,9 @@ func setupTestEnvironment(t *testing.T) (*echo.Echo, *MockDataStore, *Controller
 
 	// Create settings
 	settings := &conf.Settings{
-		WebServer: struct {
-			Debug   bool
-			Enabled bool
-			Port    string
-			Log     conf.LogConfig
-		}{
-			Debug: true,
+		WebServer: conf.WebServerSettings{
+			Debug:      true,
+			LiveStream: conf.LiveStreamSettings{},
 		},
 	}
 
