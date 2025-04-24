@@ -315,6 +315,11 @@ func (p *FFmpegProcess) processAudio(ctx context.Context, url string,
 
 		if n > 0 {
 			watchdog.update()
+				// Broadcast audio data to WebSocket clients
+				broadcastAudioData(url, buf[:n])
+
+				// Calculate audio level with source information
+				audioLevelData := calculateAudioLevel(buf[:n], url, "")
 
 			// Process audio data with better error handling
 			if err := processAudioData(url, buf[:n], audioLevelChan); err != nil {

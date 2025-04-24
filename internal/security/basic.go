@@ -1,19 +1,28 @@
 package security
 
 import (
+	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/sessions"
 	"github.com/labstack/echo/v4"
 	"github.com/markbates/goth/gothic"
+	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
 // IsInLocalSubnet checks if the given IP is in the same subnet as any local network interface
 func IsInLocalSubnet(clientIP net.IP) bool {
 	if clientIP == nil {
 		return false
+	}
+
+	// If running in container, check if client IP is in the same subnet as the host
+	if conf.RunningInContainer() {
+		return conf.IsInHostSubnet(clientIP)
 	}
 
 	addrs, err := net.InterfaceAddrs()
@@ -59,15 +68,42 @@ func getIPv4Subnet(ip net.IP) net.IP {
 }
 
 // configureLocalNetworkCookieStore configures the cookie store for local network access
-func configureLocalNetworkCookieStore() {
-	store := gothic.Store.(*sessions.CookieStore)
-	store.Options = &sessions.Options{
-		Path: "/",
-		// Allow cookies to be sent over HTTP, this is for development purposes only
-		// and is allowed only for local LAN access
-		Secure:   false,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+func (s *OAuth2Server) configureLocalNetworkCookieStore() {
+	// Configure session options based on store type
+	switch store := gothic.Store.(type) {
+	case *sessions.CookieStore:
+		store.Options = &sessions.Options{
+			Path: "/",
+			// Allow cookies to be sent over HTTP, this is for development purposes only
+			// and is allowed only for local LAN access
+			Secure:   false,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		}
+	case *sessions.FilesystemStore:
+		store.Options = &sessions.Options{
+			Path:     "/",
+			MaxAge:   86400 * 7, // 7 days
+			Secure:   false,     // Allow cookies to be sent over HTTP for local LAN access
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		}
+	default:
+		log.Printf("Warning: Unknown session store type %T, using default cookie store options", store)
+		// Create a default cookie store as fallback - only for reference, not actually used
+		// Use the configured session secret instead of a hardcoded value
+		sessionSecret := s.Settings.Security.SessionSecret
+		if sessionSecret == "" {
+			// If no session secret is configured, use a pseudo-random value
+			// This is still not ideal but better than a hardcoded string
+			sessionSecret = fmt.Sprintf("birdnet-go-%d", time.Now().UnixNano())
+			log.Printf("Warning: No session secret configured, using temporary value")
+		}
+
+		// Note: This store is not actually used, it's only created as a reference
+		// for what options would be applied to a proper store. The warning above
+		// alerts operators about the unknown store type.
+		_ = sessions.NewCookieStore([]byte(sessionSecret))
 	}
 }
 
@@ -98,51 +134,66 @@ func (s *OAuth2Server) HandleBasicAuthToken(c echo.Context) error {
 	// Verify client credentials from Authorization header
 	clientID, clientSecret, ok := c.Request().BasicAuth()
 	if !ok || clientID != s.Settings.Security.BasicAuth.ClientID || clientSecret != s.Settings.Security.BasicAuth.ClientSecret {
+		s.Debug("Invalid client credentials: %s", clientID)
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Invalid client id or secret"})
 	}
 
 	// Check if client is in local subnet and configure cookie store accordingly
 	if clientIP := net.ParseIP(c.RealIP()); IsInLocalSubnet(clientIP) {
 		// For clients in the local subnet, allow non-HTTPS cookies
-		configureLocalNetworkCookieStore()
+		s.Debug("Client in local subnet, configuring cookie store accordingly")
+		s.configureLocalNetworkCookieStore()
 	}
 
 	grantType := c.FormValue("grant_type")
 	code := c.FormValue("code")
 	redirectURI := c.FormValue("redirect_uri")
 
+	s.Debug("Token request: grant_type=%s, code=%s, redirect_uri=%s", grantType, code, redirectURI)
+
 	// Check for required fields
 	if grantType == "" || code == "" || redirectURI == "" {
+		s.Debug("Missing required fields in token request")
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Missing required fields"})
 	}
 
 	// Verify grant type
 	if grantType != "authorization_code" {
+		s.Debug("Unsupported grant type: %s", grantType)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Unsupported grant type"})
 	}
 
 	// Verify redirect URI
 	if !strings.Contains(redirectURI, s.Settings.Security.Host) {
+		s.Debug("Invalid redirect URI host: %s, expected %s", redirectURI, s.Settings.Security.Host)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid host for redirect URI"})
 	}
 
 	// Exchange the authorization code for an access token
 	accessToken, err := s.ExchangeAuthCode(code)
 	if err != nil {
+		s.Debug("Failed to exchange auth code: %v", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid authorization code"})
 	}
 
 	// Store the access token in Gothic session
 	if err := gothic.StoreInSession("access_token", accessToken, c.Request(), c.Response()); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to store access token in session")
+		s.Debug("Failed to store access token in session: %v", err)
+		// Continue anyway since we'll return the token to the client
 	}
 
+	// Ensure content type is set explicitly
+	c.Response().Header().Set("Content-Type", "application/json")
+
 	// Return the access token in the response body
-	return c.JSON(http.StatusOK, map[string]string{
+	resp := map[string]string{
 		"access_token": accessToken,
 		"token_type":   "Bearer",
 		"expires_in":   s.Settings.Security.BasicAuth.AccessTokenExp.String(),
-	})
+	}
+
+	s.Debug("Successfully exchanged token, returning response")
+	return c.JSON(http.StatusOK, resp)
 }
 
 // HandleBasicAuthCallback handles the basic authorization callback flow

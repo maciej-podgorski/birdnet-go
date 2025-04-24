@@ -19,7 +19,6 @@ import (
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
 	"github.com/tphakala/birdnet-go/internal/myaudio"
-	"github.com/tphakala/birdnet-go/internal/observation"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
 )
 
@@ -199,10 +198,35 @@ func (p *Processor) processResults(item *birdnet.Results) []Detections {
 	// Process each result in item.Results
 	for _, result := range item.Results {
 		var confidenceThreshold float32
-		scientificName, commonName, _ := observation.ParseSpeciesString(result.Species)
+
+		// Use BirdNET's EnrichResultWithTaxonomy instead of ParseSpeciesString
+		// to ensure we get the correct species code from the taxonomy map
+		scientificName, commonName, speciesCode := p.Bn.EnrichResultWithTaxonomy(result.Species)
+
+		// Skip processing if we couldn't parse the species properly
+		if commonName == "" && scientificName == "" {
+			if p.Settings.Debug {
+				log.Printf("Skipping species with invalid format: %s", result.Species)
+			}
+			continue
+		}
+
+		// If using a custom model and the species doesn't have a taxonomy code,
+		// a placeholder code may have been generated. Log this if in debug mode.
+		if p.Settings.BirdNET.ModelPath != "" && p.Settings.Debug && speciesCode != "" {
+			// Check if the code looks like a placeholder (has the pattern XX or similar followed by 6 hex chars)
+			if len(speciesCode) == 8 && (speciesCode[:2] == "XX" || (speciesCode[0] >= 'A' && speciesCode[0] <= 'Z' && speciesCode[1] >= 'A' && speciesCode[1] <= 'Z')) {
+				log.Printf("Using placeholder taxonomy code %s for species %s (%s)", speciesCode, scientificName, commonName)
+			}
+		}
 
 		// Convert species to lowercase for case-insensitive comparison
 		speciesLowercase := strings.ToLower(commonName)
+
+		// Fall back to using scientific name if common name is empty
+		if speciesLowercase == "" && scientificName != "" {
+			speciesLowercase = strings.ToLower(scientificName)
+		}
 
 		// Handle dog and human detection, this sets LastDogDetection and LastHumanDetection which is
 		// later used to discard detection if privacy filter or dog bark filters are enabled in settings.
@@ -252,7 +276,13 @@ func (p *Processor) processResults(item *birdnet.Results) []Detections {
 		// TODO: adjust end time based on detection pending delay
 		beginTime, endTime := item.StartTime, item.StartTime.Add(15*time.Second)
 
-		note := observation.New(p.Settings, beginTime, endTime, result.Species, float64(result.Confidence), item.Source, clipName, item.ElapsedTime)
+		// Use the new function to preserve the species code from the taxonomy lookup
+		note := p.NewWithSpeciesInfo(
+			beginTime, endTime,
+			scientificName, commonName, speciesCode,
+			float64(result.Confidence),
+			item.Source, clipName,
+			item.ElapsedTime)
 
 		// Detection passed all filters, process it
 		detections = append(detections, Detections{
@@ -454,6 +484,7 @@ func (p *Processor) getActionsForItem(detection *Detections) []Action {
 		}
 
 		var actions []Action
+		var executeDefaults bool
 
 		// Add custom actions from the new structure
 		for _, actionConfig := range speciesConfig.Actions {
@@ -469,11 +500,21 @@ func (p *Processor) getActionsForItem(detection *Detections) []Action {
 				// Add notification action handling
 				// ... implementation ...
 			}
+			// If any action has ExecuteDefaults set to true, we'll include default actions
+			if actionConfig.ExecuteDefaults {
+				executeDefaults = true
+			}
 		}
 
-		// If there are custom actions, return only those
-		if len(actions) > 0 {
+		// If there are custom actions, return only those unless executeDefaults is true
+		if len(actions) > 0 && !executeDefaults {
 			return actions
+		}
+
+		// If executeDefaults is true, combine custom and default actions
+		if len(actions) > 0 && executeDefaults {
+			defaultActions := p.getDefaultActions(detection)
+			return append(actions, defaultActions...)
 		}
 	}
 
@@ -631,4 +672,50 @@ func (p *Processor) Shutdown() error {
 
 	log.Println("Processor shutdown complete")
 	return nil
+}
+
+// NewWithSpeciesInfo creates a new observation note with pre-parsed species information
+// This ensures that the species code from the taxonomy lookup is preserved
+func (p *Processor) NewWithSpeciesInfo(
+	beginTime, endTime time.Time,
+	scientificName, commonName, speciesCode string,
+	confidence float64,
+	source, clipName string,
+	elapsedTime time.Duration) datastore.Note {
+
+	// detectionTime is time now minus 3 seconds to account for the delay in the detection
+	now := time.Now()
+	date := now.Format("2006-01-02")
+	detectionTime := now.Add(-2 * time.Second)
+	timeStr := detectionTime.Format("15:04:05")
+
+	var audioSource string
+	if p.Settings.Input.Path != "" {
+		audioSource = p.Settings.Input.Path
+	} else {
+		audioSource = source
+	}
+
+	// Round confidence to two decimal places
+	roundedConfidence := math.Round(confidence*100) / 100
+
+	// Return a new Note struct populated with the provided parameters and the current date and time
+	return datastore.Note{
+		SourceNode:     p.Settings.Main.Name,           // From the provided configuration settings
+		Date:           date,                           // Use ISO 8601 date format
+		Time:           timeStr,                        // Use 24-hour time format
+		Source:         audioSource,                    // From the provided configuration settings
+		BeginTime:      beginTime,                      // Start time of the observation
+		EndTime:        endTime,                        // End time of the observation
+		SpeciesCode:    speciesCode,                    // Species code from taxonomy lookup
+		ScientificName: scientificName,                 // Scientific name from taxonomy lookup
+		CommonName:     commonName,                     // Common name from taxonomy lookup
+		Confidence:     roundedConfidence,              // Confidence score of the observation
+		Latitude:       p.Settings.BirdNET.Latitude,    // Geographic latitude where the observation was made
+		Longitude:      p.Settings.BirdNET.Longitude,   // Geographic longitude where the observation was made
+		Threshold:      p.Settings.BirdNET.Threshold,   // Threshold setting from configuration
+		Sensitivity:    p.Settings.BirdNET.Sensitivity, // Sensitivity setting from configuration
+		ClipName:       clipName,                       // Name of the audio clip
+		ProcessingTime: elapsedTime,                    // Time taken to process the observation
+	}
 }

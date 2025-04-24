@@ -236,6 +236,11 @@ func (m *MockDataStore) GetDetectionTrends(period string, limit int) ([]datastor
 	return args.Get(0).([]datastore.DailyAnalyticsData), args.Error(1)
 }
 
+func (m *MockDataStore) SearchDetections(filters *datastore.SearchFilters) ([]datastore.DetectionRecord, int, error) {
+	args := m.Called(filters)
+	return args.Get(0).([]datastore.DetectionRecord), args.Int(1), args.Error(2)
+}
+
 // TestImageProvider implements the imageprovider.Provider interface for testing
 // with a function field for easier test setup.
 // Use this when you need a simple mock with customizable behavior via FetchFunc.
@@ -379,6 +384,9 @@ func (m *MockDataStoreV2) GetDailyAnalyticsData(startDate, endDate, species stri
 func (m *MockDataStoreV2) GetDetectionTrends(period string, limit int) ([]datastore.DailyAnalyticsData, error) {
 	return nil, nil
 }
+func (m *MockDataStoreV2) SearchDetections(filters *datastore.SearchFilters) ([]datastore.DetectionRecord, int, error) {
+	return nil, 0, nil
+}
 
 // MockImageProvider is a mock implementation of imageprovider.ImageProvider interface
 // that uses testify/mock for expectations and verification.
@@ -418,12 +426,7 @@ func setupTestEnvironment(t *testing.T) (*echo.Echo, *MockDataStore, *Controller
 
 	// Create settings
 	settings := &conf.Settings{
-		WebServer: struct {
-			Debug   bool
-			Enabled bool
-			Port    string
-			Log     conf.LogConfig
-		}{
+		WebServer: conf.WebServerSettings{
 			Debug: true,
 		},
 	}
@@ -454,7 +457,10 @@ func setupTestEnvironment(t *testing.T) (*echo.Echo, *MockDataStore, *Controller
 	controlChan := make(chan string)
 
 	// Create API controller
-	controller := New(e, mockDS, settings, birdImageCache, sunCalc, controlChan, logger)
+	controller, err := New(e, mockDS, settings, birdImageCache, sunCalc, controlChan, logger)
+	if err != nil {
+		t.Fatalf("Failed to create test API controller: %v", err)
+	}
 
 	return e, mockDS, controller
 }

@@ -39,11 +39,12 @@ type EqualizerSettings struct {
 
 // AudioSettings contains settings for audio processing and export.
 type AudioSettings struct {
-	Source        string   // audio source to use for analysis
-	FfmpegPath    string   // path to ffmpeg, runtime value
-	SoxPath       string   // path to sox, runtime value
-	SoxAudioTypes []string `yaml:"-"` // supported audio types of sox, runtime value
-	Export        struct {
+	Source          string   // audio source to use for analysis
+	FfmpegPath      string   // path to ffmpeg, runtime value
+	SoxPath         string   // path to sox, runtime value
+	SoxAudioTypes   []string `yaml:"-"` // supported audio types of sox, runtime value
+	StreamTransport string   // preferred transport for audio streaming: "auto", "sse", or "ws"
+	Export          struct {
 		Debug     bool   // true to enable audio export debug
 		Enabled   bool   // export audio clips containing indentified bird calls
 		Path      string // path to audio clip export directory
@@ -145,6 +146,7 @@ type MQTTSettings struct {
 	Topic         string        // MQTT topic
 	Username      string        // MQTT username
 	Password      string        // MQTT password
+	Retain        bool          // true to retain messages
 	RetrySettings RetrySettings // settings for retry mechanism
 }
 
@@ -178,9 +180,10 @@ type RealtimeSettings struct {
 
 // SpeciesAction represents a single action configuration
 type SpeciesAction struct {
-	Type       string   `yaml:"type"`       // Type of action (ExecuteCommand, etc)
-	Command    string   `yaml:"command"`    // Path to the command to execute
-	Parameters []string `yaml:"parameters"` // Action parameters
+	Type            string   `yaml:"type"`            // Type of action (ExecuteCommand, etc)
+	Command         string   `yaml:"command"`         // Path to the command to execute
+	Parameters      []string `yaml:"parameters"`      // Action parameters
+	ExecuteDefaults bool     `yaml:"executeDefaults"` // Whether to also execute default actions
 }
 
 // SpeciesConfig represents configuration for a specific species
@@ -281,6 +284,22 @@ type Security struct {
 	SessionSecret     string            // secret for session cookie
 }
 
+type WebServerSettings struct {
+	Debug      bool               // true to enable debug mode
+	Enabled    bool               // true to enable web server
+	Port       string             // port for web server
+	Log        LogConfig          // logging configuration for web server
+	LiveStream LiveStreamSettings // live stream configuration
+}
+
+type LiveStreamSettings struct {
+	Debug          bool   // true to enable debug mode
+	BitRate        int    // bitrate for live stream in kbps
+	SampleRate     int    // sample rate for live stream in Hz
+	SegmentLength  int    // length of each segment in seconds
+	FfmpegLogLevel string // log level for ffmpeg
+}
+
 // Settings contains all configuration options for the BirdNET-Go application.
 type Settings struct {
 	Debug bool // true to enable debug mode
@@ -299,16 +318,9 @@ type Settings struct {
 
 	Input InputConfig `yaml:"-"` // Input configuration for file and directory analysis
 
-	Realtime RealtimeSettings // Realtime processing settings
-
-	WebServer struct {
-		Debug   bool      // true to enable debug mode
-		Enabled bool      // true to enable web server
-		Port    string    // port for web server
-		Log     LogConfig // logging configuration for web server
-	}
-
-	Security Security // security configuration
+	Realtime  RealtimeSettings  // Realtime processing settings
+	WebServer WebServerSettings // web server configuration
+	Security  Security          // security configuration
 
 	Output struct {
 		File struct {

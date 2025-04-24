@@ -26,7 +26,7 @@ func setDefaultConfig() {
 	viper.SetDefault("birdnet.threshold", 0.8)
 	viper.SetDefault("birdnet.overlap", 0.0)
 	viper.SetDefault("birdnet.threads", 0)
-	viper.SetDefault("birdnet.locale", "en")
+	viper.SetDefault("birdnet.locale", "en-uk")
 	viper.SetDefault("birdnet.latitude", 0.000)
 	viper.SetDefault("birdnet.longitude", 0.000)
 	viper.SetDefault("birdnet.modelpath", "")
@@ -44,6 +44,7 @@ func setDefaultConfig() {
 
 	// Audio source configuration
 	viper.SetDefault("realtime.audio.source", "sysdefault")
+	viper.SetDefault("realtime.audio.streamtransport", "sse")
 
 	// Audio export configuration
 	viper.SetDefault("realtime.audio.export.debug", false)
@@ -138,6 +139,7 @@ func setDefaultConfig() {
 	viper.SetDefault("realtime.mqtt.topic", "birdnet")
 	viper.SetDefault("realtime.mqtt.username", "")
 	viper.SetDefault("realtime.mqtt.password", "")
+	viper.SetDefault("realtime.mqtt.retain", false)
 	viper.SetDefault("realtime.mqtt.retrysettings.enabled", true)
 	viper.SetDefault("realtime.mqtt.retrysettings.maxretries", 5)
 	viper.SetDefault("realtime.mqtt.retrysettings.initialdelay", 30)
@@ -171,6 +173,13 @@ func setDefaultConfig() {
 	viper.SetDefault("webserver.log.rotation", RotationDaily)
 	viper.SetDefault("webserver.log.maxsize", 1048576)
 	viper.SetDefault("webserver.log.rotationday", time.Sunday)
+
+	// Live stream configuration
+	viper.SetDefault("webserver.livestream.debug", false)
+	viper.SetDefault("webserver.livestream.bitrate", 128)
+	viper.SetDefault("webserver.livestream.sampleRate", 48000)
+	viper.SetDefault("webserver.livestream.segmentLength", 2)
+	viper.SetDefault("webserver.livestream.ffmpegLogLevel", "warning")
 
 	// File output configuration
 	viper.SetDefault("output.file.enabled", true)

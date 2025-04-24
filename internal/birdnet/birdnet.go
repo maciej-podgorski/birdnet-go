@@ -2,13 +2,13 @@
 package birdnet
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	_ "embed" // Embedding data directly into the binary.
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +18,9 @@ import (
 	tflite "github.com/tphakala/go-tflite"
 	"github.com/tphakala/go-tflite/delegates/xnnpack"
 )
+
+// Default model version for the embedded model
+const DefaultModelVersion = "BirdNET_GLOBAL_6K_V2.4"
 
 // Embedded TensorFlow Lite model data.
 //
@@ -35,23 +38,46 @@ var metaModelDataV2 []byte
 // Model version string, default is the embedded model version
 var modelVersion = "BirdNET GLOBAL 6K V2.4 FP32"
 
-// Embedded labels in zip format.
-//
-//go:embed data/labels.zip
-var labelsZip []byte
-
 // BirdNET struct represents the BirdNET model with interpreters and configuration.
 type BirdNET struct {
 	AnalysisInterpreter *tflite.Interpreter
 	RangeInterpreter    *tflite.Interpreter
 	Settings            *conf.Settings
+	ModelInfo           ModelInfo           // Information about the current model
+	TaxonomyMap         TaxonomyMap         // Mapping of species codes to names and vice versa
+	ScientificIndex     ScientificNameIndex // Index for fast scientific name lookups
+	TaxonomyPath        string              // Path to custom taxonomy file, if used
 	mu                  sync.Mutex
 }
 
 // NewBirdNET initializes a new BirdNET instance with given settings.
 func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 	bn := &BirdNET{
-		Settings: settings,
+		Settings:     settings,
+		TaxonomyPath: "", // Default to embedded taxonomy
+	}
+
+	// Determine model info based on settings
+	var modelIdentifier string
+	if settings.BirdNET.ModelPath != "" {
+		// Use custom model path
+		modelIdentifier = settings.BirdNET.ModelPath
+	} else {
+		// Use default embedded model
+		modelIdentifier = DefaultModelVersion
+	}
+
+	// Get model info
+	var err error
+	bn.ModelInfo, err = DetermineModelInfo(modelIdentifier)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine model information: %w", err)
+	}
+
+	// Load taxonomy data
+	bn.TaxonomyMap, bn.ScientificIndex, err = LoadTaxonomyData(bn.TaxonomyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load taxonomy data: %w", err)
 	}
 
 	if err := bn.initializeModel(); err != nil {
@@ -73,6 +99,13 @@ func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 		return nil, err
 	}
 	settings.BirdNET.Locale = normalizedLocale
+
+	// Check if the locale is supported by the model
+	if !IsLocaleSupported(&bn.ModelInfo, normalizedLocale) {
+		bn.Debug("Warning: Locale '%s' is not officially supported by model '%s'. Using default locale '%s'.",
+			normalizedLocale, bn.ModelInfo.ID, bn.ModelInfo.DefaultLocale)
+		settings.BirdNET.Locale = bn.ModelInfo.DefaultLocale
+	}
 
 	return bn, nil
 }
@@ -125,8 +158,16 @@ func (bn *BirdNET) initializeModel() error {
 		return fmt.Errorf("tensor allocation failed")
 	}
 
-	// Replace model version if custom model is used
+	// Update model version based on custom model path if provided
 	if bn.Settings.BirdNET.ModelPath != "" {
+		// Extract model version from the file name if possible
+		fileName := filepath.Base(bn.Settings.BirdNET.ModelPath)
+		if strings.HasPrefix(fileName, "BirdNET_") && strings.Contains(fileName, "_Model_") {
+			parts := strings.Split(fileName, "_Model_")
+			bn.ModelInfo.ID = parts[0]
+		} else {
+			bn.ModelInfo.ID = "Custom"
+		}
 		modelVersion = bn.Settings.BirdNET.ModelPath
 	}
 
@@ -210,7 +251,7 @@ func (bn *BirdNET) determineThreadCount(configuredThreads int) int {
 	return configuredThreads
 }
 
-// loadLabels extracts and loads labels from either the embedded zip file or an external file
+// loadLabels extracts and loads labels from either the embedded files or an external file
 func (bn *BirdNET) loadLabels() error {
 	bn.Settings.BirdNET.Labels = []string{} // Reset labels.
 
@@ -223,26 +264,50 @@ func (bn *BirdNET) loadLabels() error {
 	return bn.loadExternalLabels()
 }
 
+// loadEmbeddedLabels loads labels from the embedded label files
 func (bn *BirdNET) loadEmbeddedLabels() error {
-	reader := bytes.NewReader(labelsZip)
-	zipReader, err := zip.NewReader(reader, int64(len(labelsZip)))
-	if err != nil {
-		return err
-	}
-
 	// if locale is not set use english as default
 	if bn.Settings.BirdNET.Locale == "" {
-		fmt.Println("BirdNET locale not set, using English as default")
-		bn.Settings.BirdNET.Locale = "en"
+		fmt.Println("BirdNET locale not set, using English (US) as default")
+		bn.Settings.BirdNET.Locale = "en-us"
 	}
 
-	labelFileName := fmt.Sprintf("labels_%s.txt", bn.Settings.BirdNET.Locale)
-	for _, file := range zipReader.File {
-		if file.Name == labelFileName {
-			return bn.readLabelFile(file)
+	// Get the appropriate locale code for the model version
+	localeCode := bn.Settings.BirdNET.Locale
+
+	// Use the helper function to get the label file data
+	data, err := GetLabelFileData(bn.ModelInfo.ID, localeCode)
+	if err != nil {
+		bn.Debug("Error loading V2.4 label file: %v", err)
+		// Fall back to English if the requested locale isn't available
+		if localeCode != "en" && localeCode != "en-us" {
+			bn.Debug("Falling back to English (US) labels")
+			data, err = GetLabelFileData(bn.ModelInfo.ID, "en-us")
+			if err != nil {
+				return fmt.Errorf("failed to load fallback English labels: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to load label file: %w", err)
 		}
 	}
-	return fmt.Errorf("label file '%s' not found in the zip archive", labelFileName)
+
+	// Read the labels line by line
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			bn.Settings.BirdNET.Labels = append(bn.Settings.BirdNET.Labels, line)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error scanning label file: %w", err)
+	}
+
+	// Check and log species missing from taxonomy
+	bn.logMissingTaxonomyCodes()
+
+	return nil
 }
 
 func (bn *BirdNET) loadExternalLabels() error {
@@ -252,43 +317,45 @@ func (bn *BirdNET) loadExternalLabels() error {
 	}
 	defer file.Close()
 
-	// Read the first 4 bytes to check if it's a zip file
-	header := make([]byte, 4)
-	if _, err := file.Read(header); err != nil {
-		return fmt.Errorf("failed to read file header: %w", err)
+	// Read the file directly as a text file
+	err = bn.loadLabelsFromText(file)
+	if err != nil {
+		return err
 	}
 
-	// Reset the file pointer to the beginning
-	if _, err := file.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to reset file pointer: %w", err)
-	}
+	// Check and log species missing from taxonomy
+	bn.logMissingTaxonomyCodes()
 
-	// Check if it's a zip file (ZIP files start with "PK\x03\x04")
-	if bytes.Equal(header, []byte("PK\x03\x04")) {
-		return bn.loadLabelsFromZip(file)
-	}
-
-	// If not a zip file, treat it as a plain text file
-	return bn.loadLabelsFromText(file)
+	return nil
 }
 
-func (bn *BirdNET) loadLabelsFromZip(file *os.File) error {
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to get file info: %w", err)
-	}
-	zipReader, err := zip.NewReader(file, fileInfo.Size())
-	if err != nil {
-		return fmt.Errorf("failed to create zip reader: %w", err)
-	}
+// logMissingTaxonomyCodes checks labels against the taxonomy map and logs information about missing species
+func (bn *BirdNET) logMissingTaxonomyCodes() {
+	// Validate labels against taxonomy
+	complete, missing := IsTaxonomyComplete(bn.TaxonomyMap, bn.Settings.BirdNET.Labels)
+	if !complete {
+		// For custom models, provide more detailed information about missing taxonomy codes
+		if bn.Settings.BirdNET.ModelPath != "" || bn.Settings.BirdNET.LabelPath != "" {
+			bn.Debug("Custom model/labels detected: %d species are missing from the taxonomy data", len(missing))
+			bn.Debug("Placeholder taxonomy codes will be generated for these species")
+		} else {
+			bn.Debug("Warning: %d species are missing from the taxonomy data", len(missing))
+		}
 
-	labelFileName := fmt.Sprintf("labels_%s.txt", bn.Settings.BirdNET.Locale)
-	for _, zipFile := range zipReader.File {
-		if zipFile.Name == labelFileName {
-			return bn.readLabelFile(zipFile)
+		if bn.Settings.BirdNET.Debug {
+			for i, species := range missing {
+				if i < 10 { // Only show the first 10 to avoid flooding logs
+					code := GeneratePlaceholderCode(species)
+					scientific, common := SplitSpeciesName(species)
+					bn.Debug("Missing taxonomy for '%s' (Sci: '%s', Common: '%s') - using placeholder code: %s",
+						species, scientific, common, code)
+				} else if i == 10 {
+					bn.Debug("... and %d more", len(missing)-10)
+					break
+				}
+			}
 		}
 	}
-	return fmt.Errorf("label file '%s' not found in the zip archive", labelFileName)
 }
 
 func (bn *BirdNET) loadLabelsFromText(file *os.File) error {
@@ -297,21 +364,6 @@ func (bn *BirdNET) loadLabelsFromText(file *os.File) error {
 		bn.Settings.BirdNET.Labels = append(bn.Settings.BirdNET.Labels, strings.TrimSpace(scanner.Text()))
 	}
 	return scanner.Err()
-}
-
-// readLabelFile reads and processes the label file from the zip archive.
-func (bn *BirdNET) readLabelFile(file *zip.File) error {
-	fileReader, err := file.Open()
-	if err != nil {
-		return err
-	}
-	defer fileReader.Close()
-
-	scanner := bufio.NewScanner(fileReader)
-	for scanner.Scan() {
-		bn.Settings.BirdNET.Labels = append(bn.Settings.BirdNET.Labels, strings.TrimSpace(scanner.Text()))
-	}
-	return scanner.Err() // Returns nil if no errors occurred during scanning.
 }
 
 // Delete releases resources used by the TensorFlow Lite interpreters.
@@ -369,6 +421,23 @@ func (bn *BirdNET) ReloadModel() error {
 	// Store old interpreters to clean up after successful reload
 	oldAnalysisInterpreter := bn.AnalysisInterpreter
 	oldRangeInterpreter := bn.RangeInterpreter
+
+	// Re-determine model info if using a custom model path
+	if bn.Settings.BirdNET.ModelPath != "" {
+		var err error
+		bn.ModelInfo, err = DetermineModelInfo(bn.Settings.BirdNET.ModelPath)
+		if err != nil {
+			return fmt.Errorf("\033[31m❌ failed to determine model information: %w\033[0m", err)
+		}
+	}
+
+	// Reload taxonomy data if needed
+	var err error
+	bn.TaxonomyMap, bn.ScientificIndex, err = LoadTaxonomyData(bn.TaxonomyPath)
+	if err != nil {
+		return fmt.Errorf("\033[31m❌ failed to reload taxonomy data: %w\033[0m", err)
+	}
+	bn.Debug("\033[32m✅ Taxonomy data reloaded successfully\033[0m")
 
 	// Initialize new model
 	if err := bn.initializeModel(); err != nil {
@@ -432,6 +501,16 @@ func (bn *BirdNET) ReloadModel() error {
 	return nil
 }
 
+// GetSpeciesCode returns the eBird species code for a given label
+func (bn *BirdNET) GetSpeciesCode(label string) (string, bool) {
+	return GetSpeciesCodeFromName(bn.TaxonomyMap, bn.ScientificIndex, label)
+}
+
+// GetSpeciesWithScientificAndCommonName returns the scientific name and common name for a label
+func (bn *BirdNET) GetSpeciesWithScientificAndCommonName(label string) (scientific, common string) {
+	return SplitSpeciesName(label)
+}
+
 // Debug prints debug messages if debug mode is enabled
 func (bn *BirdNET) Debug(format string, v ...interface{}) {
 	if bn.Settings.BirdNET.Debug {
@@ -441,4 +520,21 @@ func (bn *BirdNET) Debug(format string, v ...interface{}) {
 			log.Printf("[birdnet] "+format, v...)
 		}
 	}
+}
+
+// EnrichResultWithTaxonomy adds taxonomy information to a detection result
+// Returns scientific name, common name, and eBird code if available
+func (bn *BirdNET) EnrichResultWithTaxonomy(speciesLabel string) (scientific, common, code string) {
+	scientific, common = SplitSpeciesName(speciesLabel)
+
+	// Try to get the eBird code
+	code, exists := GetSpeciesCodeFromName(bn.TaxonomyMap, bn.ScientificIndex, speciesLabel)
+	if !exists {
+		// We got a placeholder code for a species not in our taxonomy
+		if bn.Settings.BirdNET.Debug {
+			bn.Debug("Species '%s' not found in taxonomy, using generated placeholder code: %s", speciesLabel, code)
+		}
+	}
+
+	return scientific, common, code
 }
